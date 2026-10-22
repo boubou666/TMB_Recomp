@@ -21,6 +21,20 @@ patch_cache = true
 
 # Functions to stub (only names with runtime syscall/stub handlers)
 stubs = [
+  # --- Manual: Logitech steering wheel support (LGDEV.IRX). USBD.IRX and LGDEV.IRX
+  # fail to start in the IOP emulator (no USB host controller), so RPC server
+  # 0x046d never appears and lgDevInit spins forever on sceSifBindRpc. Disable the
+  # whole Logitech path until the IOP side exists.
+  "ret0@0x00210B08", # lgDevInit
+  "ret0@0x001D8AE0", # inputLgUpdate__Fv
+  "ret0@0x001DA580", # inputSetLgSpringOffset__Fii
+  "ret0@0x001DA5E0", # inputSetLgSpringEffect__Fiiiii
+  "ret0@0x001DA778", # inputSetLgCollisionEffect__Fiiii
+  "ret0@0x001DA8B8", # inputSetLgSmallActuatorEffect__Fiii
+  "ret0@0x001DAB78", # inputSetLgLargeActuatorEffect__Fiiiiii
+  "ret0@0x001DAD30", # inputStartLgEffect__FiPi
+  "ret0@0x001DADA8", # inputSetLgTurningFriction__Fif
+  # --- Analyzer output below
   "_exit@0x001000B0",
   "sceGsResetGraph@0x002045C0",
   "sceGsGetGParam@0x002046D0",

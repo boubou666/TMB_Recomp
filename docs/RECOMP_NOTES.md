@@ -35,7 +35,24 @@ Runtime (in the fork):
    intrinsics only had `/arch:AVX2` on MSVC; on Linux `ps2_memory.cpp` failed with "inlining failed in call to
    always_inline `_mm_extract_epi64`". Applied PUBLIC on `ps2_runtime` so the runner and generated code match.
 
-Game-specific: none yet.
+Game-specific:
+2. `runtime/tmb_overrides.cpp`: the CD device gets the disc image (`TMB_ISO`, else the first `.iso` walking up from
+   `game/`). Right after boot `fileCdRead` (0x1c4108) calls `sceCdRead(LBN 0x10, 1 sector)`, the ISO primary volume
+   descriptor, which the file-backed `cdrom0:` cannot serve ("unresolved LBN 0x10").
+3. `recomp/tmb_sces50360.toml`: `ret0` stubs on the Logitech wheel path (`lgDevInit`, `inputLgUpdate__Fv`, the
+   `inputSetLg*`/`inputStartLgEffect` force-feedback helpers). See "First boot" below.
+
+## First boot (2026-10-22)
+Log of the first run (`build/run1.log`): ELF loaded, override applied, `SifInitRpc`, then the game loads its IRX
+modules through `sceSifLoadModule` in this order: SIO2MAN, MTAPMAN, MCMAN, MCSERV, PADMAN, LIBSD, 989SND, USBD,
+LGDEV. All run in the IOP emulator; 989SND prints its banner. `USBD.IRX` and `LGDEV.IRX` return start=1
+(NO_RESIDENT_END: no USB host controller in the emulator), so LGDEV never registers RPC server **0x046d**
+(the Logitech vendor id). `lgDevInit` (0x210b08) then loops forever: `sceSifBindRpc(cd, 0x046d)` returns >= 0 but
+`cd->server` (offset 0x24) stays 0, so it delays 0x10000 iterations and binds again. Observed as `pc=0x210b30`
+on every `[run:tick]` with one active thread. Only `inputInit__Fv` calls it and ignores the result; `inputLgUpdate__Fv`
+is the only other entry into the lgDev API. Stubbing both (and the force-feedback helpers) removes the wheel support
+until the IOP side exists. A proper fix would be OHCI emulation in `ps2xIOP` so `USBD.IRX` starts.
 
 ## Open
-- First boot not attempted yet (runner build in progress at the time of writing).
+- Verify the boot continues past `inputInit` with the stubs (rebuild in progress).
+- No frame was presented in the first 60 s (`PS2X_CAPTURE_DIR` wrote nothing).
