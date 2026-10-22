@@ -7,6 +7,10 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
 #include <string>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <algorithm>
 
 #include <cstdlib>
 #include <filesystem>
@@ -173,8 +177,123 @@ namespace
         }
     }
 
+    // TMB_TRACE_THREADS=<seconds>: print every guest thread and semaphore that often (hang hunting).
+    void startThreadTrace(PS2Runtime &runtime, double periodSeconds)
+    {
+        std::thread([&runtime, periodSeconds]()
+                    {
+                        static const char *const kStatus[] = {"run", "ready", "wait", "wait+susp", "susp", "dormant"};
+                        static const char *const kWait[] = {"-", "sleep", "sema", "evflag", "vsync", "external", "mpeg"};
+                        for (uint32_t pass = 0;; ++pass)
+                        {
+                            std::this_thread::sleep_for(std::chrono::duration<double>(periodSeconds));
+                            const EeKernelSnapshot snap = runtime.eeScheduler().snapshot();
+                            std::cerr << "[tmb:threads] pass " << pass << " running=" << snap.runningThreadId
+                                      << " | mpeg: " << ps2_stubs::mpegDebugSummary() << std::endl;
+                            for (const EeThreadSnapshot &t : snap.threads)
+                            {
+                                const auto st = static_cast<size_t>(t.status);
+                                const auto wr = static_cast<size_t>(t.waitReason);
+                                std::cerr << std::hex << "  th" << std::dec << t.id << " " << (st < 6 ? kStatus[st] : "?")
+                                          << " wait=" << (wr < 7 ? kWait[wr] : "?") << ":" << t.waitId
+                                          << " prio=" << t.currentPriority << std::hex << " pc=0x" << t.pc
+                                          << " ra=0x" << t.ra << " sp=0x" << t.sp << " entry=0x" << t.entry << std::dec
+                                          << " wakeups=" << t.wakeupCount << " depth=" << t.invocationDepth << std::endl;
+                            }
+                            {
+                                PS2Memory &m = runtime.memory();
+                                std::cerr << std::hex << "  [gs] pmode=0x" << m.read64(0x12000000u) << " smode2=0x" << m.read64(0x12000020u)
+                                          << " dispfb1=0x" << m.read64(0x12000070u) << " display1=0x" << m.read64(0x12000080u)
+                                          << " dispfb2=0x" << m.read64(0x12000090u) << " display2=0x" << m.read64(0x120000A0u)
+                                          << std::dec << std::endl;
+                            }
+                            if (std::getenv("TMB_TRACE_IOP"))
+                            {
+                                const auto iop = runtime.iopDebugSnapshot();
+                                for (const std::string &line : iop.diagnostics)
+                                {
+                                    std::cerr << "  [iop] " << line << std::endl;
+                                }
+                            }
+                            for (const EeSemaphoreSnapshot &sem : snap.semaphores)
+                            {
+                                if (sem.waiters != 0u)
+                                {
+                                    std::cerr << "  sema" << sem.id << " count=" << sem.count << "/" << sem.maxCount
+                                              << " waiters=" << sem.waiters << std::endl;
+                                }
+                            }
+                        } })
+            .detach();
+    }
+
+    // End of a movie. Every PSS ends with 4 bytes past its last sector (the program end code); the
+    // player treats the stream as complete with < 5 bytes left and never reads them. It then calls
+    // videoDecFlush, which appends a sequence_end_code to the IPU ring so the decoder finishes. With
+    // libmpeg HLE'd, tell the HLE the input is complete once that flush succeeds.
+    constexpr uint32_t kVideoDecFlush = 0x001FF9E0u;
+
+    void videoDecFlushOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t videoDec = getRegU32(ctx, 4);
+        videoDecFlush__FP8VideoDec_0x1ff9e0(rdram, ctx, runtime);
+        if (getRegU32(ctx, 2) != 0u)
+        {
+            ps2_stubs::endMpegPlaybackInput(runtime, videoDec);
+        }
+    }
+
+    // TMB_TRACE_SND=1: log every 989snd command sent with snd_SendIOPCommandAndWait (bring-up aid).
+    constexpr uint32_t kSndSendIopCommandAndWait = 0x001BCE28u;
+
+    void sndSendIopCommandAndWaitTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static uint32_t s_calls = 0;
+        const uint32_t command = getRegU32(ctx, 4);
+        const int32_t count = static_cast<int32_t>(getRegU32(ctx, 5));
+        const uint32_t args = getRegU32(ctx, 6);
+        const uint32_t n = s_calls++;
+        std::cerr << std::hex << "[tmb:snd] #" << std::dec << n << " cmd=0x" << std::hex << command << " argc=" << std::dec << count;
+        for (int32_t i = 0; i < count && i < 6; ++i)
+        {
+            std::cerr << std::hex << " 0x" << *reinterpret_cast<const uint32_t *>(rdram + ((args + 4u * static_cast<uint32_t>(i)) & 0x1FFFFFFu));
+        }
+        std::cerr << std::dec << std::endl;
+        snd_SendIOPCommandAndWait_0x1bce28(rdram, ctx, runtime);
+        std::cerr << "[tmb:snd] #" << n << " -> 0x" << std::hex << getRegU32(ctx, 2) << std::dec << std::endl;
+    }
+
+    // TMB_TRACE_HIER=1: count VIF1 DMA completion handler calls of the hier renderer (bring-up aid).
+    constexpr uint32_t kHierDmaHandler = 0x001D63A0u;
+    std::atomic<uint32_t> g_hierDmaCalls{0};
+
+    void hierDmaHandlerTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t channel = getRegU32(ctx, 4);
+        const auto rd = [&](uint32_t addr) { return *reinterpret_cast<const uint32_t *>(rdram + (addr & 0x1FFFFFFu)); };
+        const uint32_t before0 = rd(0x00503CF8u), before1 = rd(0x00503CFCu);
+        hierDmaHandler__Fi_0x1d63a0(rdram, ctx, runtime);
+        const uint32_t n = g_hierDmaCalls.fetch_add(1);
+        if (n < 20u || (n % 500u) == 0u)
+            std::cerr << "[tmb:hier] dma handler #" << n << " ch=" << channel << " flags " << before0 << "," << before1
+                      << " -> " << rd(0x00503CF8u) << "," << rd(0x00503CFCu) << std::endl;
+    }
+
     void applyTmb(PS2Runtime &runtime)
     {
+        if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
+        {
+            runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);
+        }
+        if (const char *trace = std::getenv("TMB_TRACE_SND"); trace && *trace == '1')
+        {
+            runtime.registerFunction(kSndSendIopCommandAndWait, &sndSendIopCommandAndWaitTrace);
+        }
+        runtime.registerFunction(kVideoDecFlush, &videoDecFlushOverride);
+        if (const char *period = std::getenv("TMB_TRACE_THREADS"); period && *period)
+        {
+            startThreadTrace(runtime, std::max(0.5, std::atof(period)));
+        }
         runtime.registerFunction(kVideoDecAbort, &videoDecAbortOverride);
         if (const char *trace = std::getenv("TMB_TRACE_FONT"); trace && *trace == '1')
         {

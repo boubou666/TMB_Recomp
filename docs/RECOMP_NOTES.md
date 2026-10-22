@@ -134,9 +134,37 @@ The band of texture garbage under the title movie was circuit 2 showing 2048 lin
 builds DISPLAY2 from the movie's `sceMpeg.width/height` (0x4c7a30), which the HLE `sceMpegReset` zeroed
 (DH = height - 1 = -1). Fixed in the fork: reset keeps the size, like libmpeg.
 
+## Menus to the first match (2026-10-23)
+Driving the title with Cross presses (`PS2X_PAD_SCRIPT`), ONE PLAYER plays `TTL_GM.PSS` then `GM_CS1.PSS`, the
+level select (Yorke Bros. Scrap & Salvage, level 1 of 8), the loading screen, then the match. Four blockers:
+- **Movies that never end.** Every PSS is N sectors + 4 bytes, the 4 bytes being the program end code. The
+  player treats a stream as complete with < 5 bytes left, never reads them, and calls `videoDecFlush` (sequence
+  end code into the IPU ring). The first two movies only ended because the runtime read past their end.
+  `runtime/tmb_overrides.cpp` overrides `videoDecFlush` (0x1ff9e0) to call the fork's `endMpegPlaybackInput`.
+- **Level load hang in 989snd.** `snd_SendIOPCommandAndWait` waited forever for the reply to command 3 (load a
+  sound bank by LBN, here `SND/EXPLOS.BNK`). `PS2X_IOP_TRACE_RPC=1` showed the 989snd RPC function exhausting
+  its 2M instruction budget at IOP 0x5f870 (`tools/irx_disasm.py`): it records `GetThreadId()` and
+  `SleepThread()`s until its loader thread wakes it, which an inline call with no thread cannot do. The fork now
+  runs RPC server functions as their `sceSifRpcLoop` thread and runs the other threads while it is blocked.
+- **Match frozen in `particleDraw`.** It waits for two flags (gp-0x32F8/-0x32F4) that `hierFlushObjQ` clears from
+  the VIF1 DMA completion handler. `hier` masks VIF1 around each kick (DisableDmac/EnableDmac) and the runtime
+  completes the transfer inside the kick, so the completion was dropped. The fork keeps masked DMAC completions
+  pending and raises them when the channel is enabled again.
+- **Segfault in the lens flare Z test.** `sceGsStoreImage` is 0x70 bytes (vifcode[4] first); the fork read it at
+  the 0x60 layout and copied a huge image. Fixed, and the copy is clamped.
+
+The match renders: car, arena, HUD (radar, weapons, health, "CAR TELEPORTED"). The frame is 640x256 (field
+rendering), shown squashed.
+
+New bring-up switches in `runtime/tmb_overrides.cpp`: `TMB_TRACE_THREADS=<s>` (guest threads, MPEG HLE summary,
+GS display registers; `TMB_TRACE_IOP=1` adds IOP threads and SPU2), `TMB_TRACE_SND=1` (989snd commands),
+`TMB_TRACE_HIER=1` (VIF1 completion handler). `tools/irx_disasm.py` disassembles IRX code at its IOP address.
+IOP stacks cannot be sampled by attaching (ptrace_scope=1): run the game under `gdb -batch` and send SIGINT.
+
 ## Open
+- Field-rendered match frames are shown at 640x256 (needs field/line doubling in presentation).
 - A small striped rectangle under "BLACK" on the title logo.
-- Menu navigation, car/level select, first match.
+- Speed, sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.

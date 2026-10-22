@@ -23,8 +23,9 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ## Status
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the copyright and Incognito movies, and shows the title screen with its main menu. Menus and gameplay are
-being brought up.
+plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD).
+Match frames are still shown squashed (field rendering), and sound, speed and controls in the match are
+being worked on.
 
 | Milestone | |
 |---|:---:|
@@ -36,7 +37,8 @@ being brought up.
 | Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
 | Title screen and main menu | ✅ |
 | Memory card | ⏳ |
-| First match: HUD, cars, textured 3D | ⏳ |
+| Menus, level select, level loading | ✅ |
+| First match: HUD, cars, textured 3D | 🔧 |
 | Sound and music (989SND) | ⏳ |
 | Story mode, saving, split screen | ⏳ |
 | Widescreen, higher resolution | ⏳ |
@@ -131,6 +133,8 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |
 | `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: first `.iso` above `game/`) |
 | `TMB_TRACE_MOVIE=1` | Log the movie player's thread teardown, audio state and MPEG HLE summary |
+| `TMB_TRACE_THREADS=<s>` | Every few seconds: guest threads, MPEG HLE state, GS display registers (`TMB_TRACE_IOP=1` adds IOP threads) |
+| `PS2X_IOP_TRACE_RPC=1` | Log IOP RPC dispatch and blocking calls |
 
 </details>
 
@@ -151,7 +155,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `recomp/` | Recompiler config (analyzer output plus manual additions) |
 | `runtime/` | Game override module (game-specific bindings) |
 | `scripts/` | Extract, build tools, analyze, recomp, build runner, run |
-| `tools/` | Analysis helpers (`iso_lbn.py`: disc file of a sector; `gs_fb_decode.py`: framebuffer out of a VRAM dump) |
+| `tools/` | Analysis helpers (`iso_lbn.py`: disc file of a sector; `gs_fb_decode.py`: framebuffer out of a VRAM dump; `irx_disasm.py`: IOP module code) |
 | `docs/` | Bring-up notes |
 | `PS2Recomp/` | PS2Recomp fork (submodule) |
 
