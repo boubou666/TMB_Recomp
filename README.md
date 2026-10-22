@@ -23,8 +23,8 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ## Status
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the copyright and Incognito movies, and shows the title screen with its main menu. A band of corrupted
-texels remains at the bottom of the title screen; menus and gameplay are being brought up.
+plays the copyright and Incognito movies, and shows the title screen with its main menu. Menus and gameplay are
+being brought up.
 
 | Milestone | |
 |---|:---:|
@@ -34,7 +34,7 @@ texels remains at the bottom of the title screen; menus and gameplay are being b
 | Language selection screen (PAL) | ✅ |
 | Controller input | ✅ |
 | Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
-| Title screen and main menu | 🔧 |
+| Title screen and main menu | ✅ |
 | Memory card | ⏳ |
 | First match: HUD, cars, textured 3D | ⏳ |
 | Sound and music (989SND) | ⏳ |

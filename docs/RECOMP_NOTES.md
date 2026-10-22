@@ -130,8 +130,12 @@ Result: logo, ONE PLAYER / MULTI-PLAYER / OPTIONS / CREDITS / LOAD GAME, button 
 Debug notes: the GS dump directory mode starts with `PS2X_GS_DUMP_AFTER=<s>` (not `PS2X_GS_DUMP_AT`, which only
 drives the single-file dump); `tools/gs_fb_decode.py` decodes a PSMCT32 buffer from `vram_after.bin` (RGB + alpha).
 
+The band of texture garbage under the title movie was circuit 2 showing 2048 lines: `setPMODE__F12PMODESetting`
+builds DISPLAY2 from the movie's `sceMpeg.width/height` (0x4c7a30), which the HLE `sceMpegReset` zeroed
+(DH = height - 1 = -1). Fixed in the fork: reset keeps the size, like libmpeg.
+
 ## Open
-- A band of corrupted texels at the bottom of the title screen (y 370-450) and two small artifacts near the logo.
+- A small striped rectangle under "BLACK" on the title logo.
 - Menu navigation, car/level select, first match.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
