@@ -32,3 +32,6 @@ generated/
 
 # Personal Claude Code settings
 .claude/settings.local.json
+
+# Runtime logs
+ps2_log.txt

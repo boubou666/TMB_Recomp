@@ -201,10 +201,10 @@ namespace
                                           << " wakeups=" << t.wakeupCount << " depth=" << t.invocationDepth << std::endl;
                             }
                             {
-                                PS2Memory &m = runtime.memory();
-                                std::cerr << std::hex << "  [gs] pmode=0x" << m.read64(0x12000000u) << " smode2=0x" << m.read64(0x12000020u)
-                                          << " dispfb1=0x" << m.read64(0x12000070u) << " display1=0x" << m.read64(0x12000080u)
-                                          << " dispfb2=0x" << m.read64(0x12000090u) << " display2=0x" << m.read64(0x120000A0u)
+                                const auto &g = runtime.memory().gs();
+                                std::cerr << std::hex << "  [gs] pmode=0x" << g.pmode << " smode2=0x" << g.smode2
+                                          << " dispfb1=0x" << g.dispfb1 << " display1=0x" << g.display1
+                                          << " dispfb2=0x" << g.dispfb2 << " display2=0x" << g.display2
                                           << std::dec << std::endl;
                             }
                             if (std::getenv("TMB_TRACE_IOP"))

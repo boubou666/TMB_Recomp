@@ -23,9 +23,8 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ## Status
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD).
-Match frames are still shown squashed (field rendering), and sound, speed and controls in the match are
-being worked on.
+plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD) at
+about 26 frames per second. Sound, full speed and controls in the match are being worked on.
 
 | Milestone | |
 |---|:---:|

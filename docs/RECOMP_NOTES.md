@@ -161,8 +161,19 @@ GS display registers; `TMB_TRACE_IOP=1` adds IOP threads and SPU2), `TMB_TRACE_S
 `TMB_TRACE_HIER=1` (VIF1 completion handler). `tools/irx_disasm.py` disassembles IRX code at its IOP address.
 IOP stacks cannot be sampled by attaching (ptrace_scope=1): run the game under `gdb -batch` and send SIGINT.
 
+## Match display and speed (2026-10-23)
+In the match the game displays circuit 2 only (PMODE 0x8002): PSMCT24 buffers at fbp 80 and 160 flipped per
+frame, 640x256 progressive (SMODE2 0, DH 255), a real 256-line mode that a PAL TV shows full height. The host
+window kept square pixels and showed it squashed; the fork now presents every frame at 4:3 (`PS2X_PIXEL_ASPECT=1`
+restores square pixels). Captures (`PS2X_CAPTURE_DIR`) stay at the raw frame size.
+
+The match ran at about 4.4 game frames per second (buffer flips per 50 Hz vblank). The runtime's aggressive logs
+also enabled `PS2_FUNCTION_LOG_TRACKER`, which appends and flushes a line in `ps2_log.txt` on every recompiled
+function entry and exit (1.7 GB written in the working directory). The fork now keeps it behind
+`PS2X_ENABLE_FUNCTION_LOG_TRACKER` (off); the other diagnostic logs stay. The match now runs at about 26 game
+frames per second.
+
 ## Open
-- Field-rendered match frames are shown at 640x256 (needs field/line doubling in presentation).
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed, sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
