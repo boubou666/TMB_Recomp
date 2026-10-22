@@ -30,9 +30,9 @@ get_target_property(_runner_sources ps2EntryRunner SOURCES)
 list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\\.cpp$")
 set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
 
-file(GLOB TMB_OVERRIDE_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/overrides/*.cpp")
+file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
 
-target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_OVERRIDE_SOURCES})
+target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_RUNTIME_SOURCES})
 target_include_directories(ps2EntryRunner PRIVATE "${TMB_GENERATED_DIR}")
 
 list(LENGTH TMB_GENERATED_SOURCES _tmb_count)
