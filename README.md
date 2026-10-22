@@ -22,8 +22,9 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 ## Status
 
-**Work in progress, not playable yet.** The game boots, runs its own IOP modules, loads the shell and shows the PAL
-language selection screen. What comes after it is being brought up.
+**Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
+plays the copyright and Incognito movies, and reaches the title screen and main menu. The screens still show
+leftover text from the language menu and some corrupted texels; menus and gameplay are being brought up.
 
 | Milestone | |
 |---|:---:|
@@ -31,11 +32,12 @@ language selection screen. What comes after it is being brought up.
 | Link the generated code with the PS2Recomp runtime on Linux | ✅ |
 | Boot: EE kernel, the game's own IOP modules, CD reads from the disc files | ✅ |
 | Language selection screen (PAL) | ✅ |
-| Memory card detection and controller | 🔧 |
-| Logos, title screen and main menu | ⏳ |
+| Controller input | ✅ |
+| Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
+| Title screen and main menu | 🔧 |
+| Memory card | ⏳ |
 | First match: HUD, cars, textured 3D | ⏳ |
 | Sound and music (989SND) | ⏳ |
-| Movies (PSS) | ⏳ |
 | Story mode, saving, split screen | ⏳ |
 | Widescreen, higher resolution | ⏳ |
 
@@ -127,6 +129,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AT=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |
 | `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: first `.iso` above `game/`) |
+| `TMB_TRACE_MOVIE=1` | Log the movie player's thread teardown, audio state and MPEG HLE summary |
 
 </details>
 
@@ -147,6 +150,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `recomp/` | Recompiler config (analyzer output plus manual additions) |
 | `runtime/` | Game override module (game-specific bindings) |
 | `scripts/` | Extract, build tools, analyze, recomp, build runner, run |
+| `tools/` | Analysis helpers (`iso_lbn.py`: which disc file holds a given sector) |
 | `docs/` | Bring-up notes |
 | `PS2Recomp/` | PS2Recomp fork (submodule) |
 

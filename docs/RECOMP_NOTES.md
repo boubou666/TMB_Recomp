@@ -72,8 +72,51 @@ BITBLTBUF/TRXPOS/TRXREG back from the packet, no unit conversion. Result: the PA
 
 Also in the fork: `PS2X_GS_LOG_LIMIT=<n>` raises the 48/128 caps on the `[gs:gif]`/`[gs:reg]` logs.
 
+## Copyright movie hang (2026-10-22)
+With `PS2X_PAD_SCRIPT="25:CROSS/300,..."` the language choice is accepted and the game plays the English
+copyright notice, which is a movie: `MOV/COPYRTE.PSS` (streamed with `sceCdStStart` at LBN 0x95a3;
+`tools/iso_lbn.py <iso> <lbn>` maps an LBN to its file). The stream stopped after 992 of 2889 sectors and the
+main thread then looped in `updateMpegMovieDecoding__Fb` on `videoDecFlush` (pc 0x1e00f8/0x1e0100), with the
+last language-screen frame left on display.
+
+The player is Sony's ezmpeg sample (`videoDec`, `viBuf`, `audioDec`, `strFile`, `readBuf`). The runtime's libmpeg
+HLE decodes video itself from `sceMpegDemuxPss*` with FFmpeg, and also forwards each M2V packet to the game's
+`videoCallback`, which copies it into `viBuf`, the IPU input ring. On hardware the IPU drains that ring through
+DMA channel 4, kicked by `viBufAddDMA` from the `mpegNodata` libmpeg callback; the HLE never calls `mpegNodata`,
+so the ring only fills. `videoDecFlush` needs 4 free bytes to append the sequence-end code, never gets them, and
+spins forever.
+
+Fix (game side, `recomp/tmb_sces50360.toml`): `ret1@0x001ED4D8` makes `videoCallback` accept and drop the packet.
+The copy has no reader with the HLE. A generic runtime fix would either skip M2V stream callbacks or emulate
+the IPU-side drain, but other ports rely on the current behaviour, so it is left to the fork later.
+
+`scripts/recomp.sh` now generates into `build/recomp-staging` and rsyncs by content into `generated/`, so a
+config change rebuilds only the touched unity batches instead of the whole game (~25 min).
+
+## Movies end, title screen reached (2026-10-22)
+Two more movie problems, both in the runtime's libmpeg HLE (fixed in the fork):
+- **End of movie.** `sceMpegIsEnd` only trusted a runtime CD stream EOF (`sceCdStStop` or the end LBN given to
+  `sceCdStStart`). TMB opens movie streams with endLbn 0xFFFFFFFF, stops reading at the file size, and calls
+  `sceCdStStop` (`strFileClose` in `termAll`) only after the movie ended, so the HLE never ended it. With
+  `TMB_TRACE_MOVIE=1` the HLE summary showed the whole PSS demuxed, 296 pictures served, `ended=1 eof=0`, while
+  the decode thread spun in `decBs0` waiting for a free `voBuf` slot. The MPEG program end code (0x000001B9) now
+  counts as producer EOF.
+- **Skip.** `ps2_stubs::abortMpegPlayback` ends a playback on demand; `runtime/tmb_overrides.cpp` calls it from a
+  `videoDecAbort` (0x1ff920) override, because the ezmpeg abort protocol (sequence_end_code into the IPU ring)
+  never reaches the host decoder.
+
+The movie display itself works: the game's `vblankHandler__Fi` (INTC VBLANK) uploads `voBuf` frames with
+`loadImage`. After `COPYRTE.PSS` the game streams `INTROPIB.PSS` and reaches the title screen (Sweet Tooth,
+ONE PLAYER menu, "x select"), then starts the attract demo ("LOADING DEMO").
+
+`TMB_TRACE_MOVIE=1` (in `runtime/tmb_overrides.cpp`) logs the player's thread teardown (`termAll`), PCM callbacks,
+`audioDecSendToIOP` state, and every 100th displaying VBlank with the HLE summary. Movie audio is off in this
+player (`isAudioOK` short-circuits), so no PCM reaches `pcmCallback`.
+
 ## Open
-- Drive the language screen with `PS2X_PAD_SCRIPT` and see how far the logos / intro movie / title get.
+- The language selection text stays drawn over every later screen (title, menu, loading). Not a game bug:
+  probably a buffer the runtime never clears, or a display-circuit merge issue.
+- A band of corrupted texels at the bottom of the title/menu screens, and garbled menu item text.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
