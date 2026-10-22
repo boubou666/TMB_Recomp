@@ -1,0 +1,39 @@
+cmake_minimum_required(VERSION 3.21)
+project(TMB_Recomp LANGUAGES C CXX)
+
+# Twisted Metal: Black (PAL, SCES-50360) static recompilation on top of PS2Recomp.
+#
+# Build the tools first (scripts/build_tools.sh), generate code (scripts/recomp.sh),
+# then configure this project to get the `ps2EntryRunner` executable with the
+# recompiled game linked in.
+
+set(TMB_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH
+    "Directory containing the output of ps2_recomp for the game ELF")
+
+# Only the runtime is needed here; the recompiler/analyzer are built separately.
+set(PS2X_BUILD_RECOMP OFF CACHE BOOL "" FORCE)
+set(PS2X_BUILD_ANALYZER OFF CACHE BOOL "" FORCE)
+set(PS2X_BUILD_TEST OFF CACHE BOOL "" FORCE)
+set(PS2X_BUILD_STUDIO OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(PS2Recomp)
+
+file(GLOB TMB_GENERATED_SOURCES CONFIGURE_DEPENDS "${TMB_GENERATED_DIR}/*.cpp")
+if(NOT TMB_GENERATED_SOURCES)
+    message(FATAL_ERROR
+        "No generated sources in ${TMB_GENERATED_DIR}. Run scripts/recomp.sh first.")
+endif()
+
+# The runtime ships a placeholder register_functions.cpp that defines the same
+# function-table globals as the generated one; drop it from the runner.
+get_target_property(_runner_sources ps2EntryRunner SOURCES)
+list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\\.cpp$")
+set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
+
+file(GLOB TMB_OVERRIDE_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/overrides/*.cpp")
+
+target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_OVERRIDE_SOURCES})
+target_include_directories(ps2EntryRunner PRIVATE "${TMB_GENERATED_DIR}")
+
+list(LENGTH TMB_GENERATED_SOURCES _tmb_count)
+message(STATUS "TMB_Recomp: linking ${_tmb_count} generated source files from ${TMB_GENERATED_DIR}")

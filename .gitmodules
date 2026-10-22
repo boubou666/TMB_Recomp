@@ -1,0 +1,3 @@
+[submodule "PS2Recomp"]
+	path = PS2Recomp
+	url = https://github.com/boubou666/PS2Recomp.git
