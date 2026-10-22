@@ -113,10 +113,26 @@ ONE PLAYER menu, "x select"), then starts the attract demo ("LOADING DEMO").
 `audioDecSendToIOP` state, and every 100th displaying VBlank with the HLE summary. Movie audio is off in this
 player (`isAudioOK` short-circuits), so no PCM reaches `pcmCallback`.
 
+## Clean title screen (2026-10-22)
+The shell uses both display circuits (PMODE 0xFF03): circuit 2 shows the movie layer (fbp 160, 640x368), circuit
+1 a UI layer (fbp 351) blended over it by its per-pixel alpha. The language menu text stayed in the UI layer
+because the layer was never cleared. Three runtime problems, all fixed in the fork:
+- `sceGsSetDefClear` was an empty stub: the clear packet in the game's `ieGsDBuffDc` stayed garbage.
+- `sceGsPutDrawEnv` applied a fixed 8 register pairs read from the giftag address (the giftag itself as a
+  register, TEST_1 dropped, clear never run). `ieGsPutDrawEnv` patches NLOOP to 16 or 22 (drawenv + clear) and
+  relies on libgraph DMAing giftag + NLOOP quadwords; the HLE now does exactly that.
+- With the layer cleared every frame the UI vanished: the host loop latched the presented frame whenever it saw
+  a new vblank tick, i.e. in the middle of the next guest frame (cleared, not yet redrawn; `PS2X_GS_SYNC=1`
+  hid it). The frame is now latched in `EeScheduler::processEvent` at the guest vblank, only when a thread
+  waits on it (frame complete), with a fallback every 3 vblanks.
+Result: logo, ONE PLAYER / MULTI-PLAYER / OPTIONS / CREDITS / LOAD GAME, button legend; no leftover text.
+
+Debug notes: the GS dump directory mode starts with `PS2X_GS_DUMP_AFTER=<s>` (not `PS2X_GS_DUMP_AT`, which only
+drives the single-file dump); `tools/gs_fb_decode.py` decodes a PSMCT32 buffer from `vram_after.bin` (RGB + alpha).
+
 ## Open
-- The language selection text stays drawn over every later screen (title, menu, loading). Not a game bug:
-  probably a buffer the runtime never clears, or a display-circuit merge issue.
-- A band of corrupted texels at the bottom of the title/menu screens, and garbled menu item text.
+- A band of corrupted texels at the bottom of the title screen (y 370-450) and two small artifacts near the logo.
+- Menu navigation, car/level select, first match.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.

@@ -23,8 +23,8 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ## Status
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the copyright and Incognito movies, and reaches the title screen and main menu. The screens still show
-leftover text from the language menu and some corrupted texels; menus and gameplay are being brought up.
+plays the copyright and Incognito movies, and shows the title screen with its main menu. A band of corrupted
+texels remains at the bottom of the title screen; menus and gameplay are being brought up.
 
 | Milestone | |
 |---|:---:|
@@ -126,7 +126,8 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_CAPTURE_DIR=<dir>`, `PS2X_CAPTURE_INTERVAL=<s>` | Save the presented frame every few seconds (works minimized) |
 | `PS2X_PAD_SCRIPT=t:BUTTON[/ms],…` | Scripted button presses (seconds from start), for unattended runs |
 | `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for the `ps2_vu1_replay` tool |
-| `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AT=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
+| `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AFTER=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
+| `PS2X_GS_SYNC=1` | Rasterize on the game thread instead of the GS worker threads |
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |
 | `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: first `.iso` above `game/`) |
 | `TMB_TRACE_MOVIE=1` | Log the movie player's thread teardown, audio state and MPEG HLE summary |
@@ -150,7 +151,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `recomp/` | Recompiler config (analyzer output plus manual additions) |
 | `runtime/` | Game override module (game-specific bindings) |
 | `scripts/` | Extract, build tools, analyze, recomp, build runner, run |
-| `tools/` | Analysis helpers (`iso_lbn.py`: which disc file holds a given sector) |
+| `tools/` | Analysis helpers (`iso_lbn.py`: disc file of a sector; `gs_fb_decode.py`: framebuffer out of a VRAM dump) |
 | `docs/` | Bring-up notes |
 | `PS2Recomp/` | PS2Recomp fork (submodule) |
 

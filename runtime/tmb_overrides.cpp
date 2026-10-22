@@ -5,6 +5,7 @@
 #include "ps2_recompiled_functions.h"
 #include "Stubs/MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_memory.h"
 #include <string>
 
 #include <cstdlib>
@@ -130,6 +131,15 @@ namespace
         const auto rd = [&](uint32_t addr) { return *reinterpret_cast<const int32_t *>(rdram + (addr & 0x1FFFFFFu)); };
         const int32_t displaying = rd(gp - 0x340Cu);
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
+        static uint32_t s_dispCalls = 0;
+        if (std::getenv("TMB_TRACE_DISPLAY") && (s_dispCalls++ % 150u) == 0u)
+        {
+            PS2Memory &m = runtime->memory();
+            std::cerr << std::hex << "[tmb:disp] pmode=0x" << m.read64(0x12000000u) << " smode2=0x" << m.read64(0x12000020u)
+                      << " dispfb1=0x" << m.read64(0x12000070u) << " display1=0x" << m.read64(0x12000080u)
+                      << " dispfb2=0x" << m.read64(0x12000090u) << " display2=0x" << m.read64(0x120000A0u)
+                      << " bg=0x" << m.read64(0x120000E0u) << std::dec << std::endl;
+        }
         if (displaying && (g_vblankCalls++ % 100u) == 0u)
         {
             std::cerr << "[tmb:vblank] call#" << g_vblankCalls << " displaying=" << displaying
@@ -139,9 +149,37 @@ namespace
         }
     }
 
+    // TMB_TRACE_FONT=1: dump the font packet state on each fontDmaFontData (bring-up aid).
+    constexpr uint32_t kFontDmaFontData = 0x001C4FE0u;
+    uint32_t g_fontCalls = 0;
+
+    void fontDmaFontDataTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t gp = getRegU32(ctx, 28);
+        const auto rd32 = [&](uint32_t addr) { return *reinterpret_cast<const int32_t *>(rdram + (addr & 0x1FFFFFFu)); };
+        const auto rd64 = [&](uint32_t addr) { return *reinterpret_cast<const uint64_t *>(rdram + (addr & 0x1FFFFFFu)); };
+        const int32_t state = rd32(gp - 0x2D28u), count = rd32(gp - 0x2D2Cu), base = rd32(gp - 0x2D20u);
+        const int32_t tagIdx = rd32(gp - 0x2D24u), prims = static_cast<int32_t>(rd32(gp - 0x2D30u) & 0xFFFF);
+        fontDmaFontData__Fv_0x1c4fe0(rdram, ctx, runtime);
+        const uint32_t n = g_fontCalls++;
+        if (n < 6u || (n % 200u) == 0u || (state == 2 && n < 400u && (n % 20u) == 0u))
+        {
+            constexpr uint32_t kBuf = 0x0050CB60u;
+            std::cerr << std::hex << "[tmb:font] call#" << std::dec << n << " state=" << state << " count=" << count
+                      << " base=" << base << " tagIdx=" << tagIdx << " prims=" << prims << std::hex
+                      << " | tag@idx=0x" << rd64(kBuf + 16u * static_cast<uint32_t>(tagIdx)) << "_" << rd64(kBuf + 16u * static_cast<uint32_t>(tagIdx) + 8u)
+                      << " q0=0x" << rd64(kBuf) << "_" << rd64(kBuf + 8u) << " after: count=" << std::dec << rd32(gp - 0x2D2Cu)
+                      << " tagIdx=" << rd32(gp - 0x2D24u) << " state=" << rd32(gp - 0x2D28u) << std::endl;
+        }
+    }
+
     void applyTmb(PS2Runtime &runtime)
     {
         runtime.registerFunction(kVideoDecAbort, &videoDecAbortOverride);
+        if (const char *trace = std::getenv("TMB_TRACE_FONT"); trace && *trace == '1')
+        {
+            runtime.registerFunction(kFontDmaFontData, &fontDmaFontDataTrace);
+        }
         if (const char *trace = std::getenv("TMB_TRACE_MOVIE"); trace && *trace == '1')
         {
             runtime.registerFunction(kTermAll, &termAllTrace);
