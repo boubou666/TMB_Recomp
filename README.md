@@ -22,15 +22,16 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 ## Status
 
-**Work in progress, not playable yet.** The main ELF recompiles cleanly and links into the runtime; first boot is being
-brought up.
+**Work in progress, not playable yet.** The game boots, runs its own IOP modules, loads the shell and shows the PAL
+language selection screen. What comes after it is being brought up.
 
 | Milestone | |
 |---|:---:|
 | Map and recompile the main ELF (3,572 functions, symbols intact) | ✅ |
 | Link the generated code with the PS2Recomp runtime on Linux | ✅ |
-| Boot: EE kernel, the game's own IOP modules, CD reads from the disc files | 🔧 |
-| Memory card detection and controller | ⏳ |
+| Boot: EE kernel, the game's own IOP modules, CD reads from the disc files | ✅ |
+| Language selection screen (PAL) | ✅ |
+| Memory card detection and controller | 🔧 |
 | Logos, title screen and main menu | ⏳ |
 | First match: HUD, cars, textured 3D | ⏳ |
 | Sound and music (989SND) | ⏳ |
@@ -123,6 +124,9 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_CAPTURE_DIR=<dir>`, `PS2X_CAPTURE_INTERVAL=<s>` | Save the presented frame every few seconds (works minimized) |
 | `PS2X_PAD_SCRIPT=t:BUTTON[/ms],…` | Scripted button presses (seconds from start), for unattended runs |
 | `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for the `ps2_vu1_replay` tool |
+| `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AT=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
+| `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |
+| `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: first `.iso` above `game/`) |
 
 </details>
 

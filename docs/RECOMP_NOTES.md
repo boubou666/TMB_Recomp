@@ -53,6 +53,27 @@ on every `[run:tick]` with one active thread. Only `inputInit__Fv` calls it and 
 is the only other entry into the lgDev API. Stubbing both (and the force-feedback helpers) removes the wheel support
 until the IOP side exists. A proper fix would be OHCI emulation in `ps2xIOP` so `USBD.IRX` starts.
 
+With the stubs the boot continues: the game loads SIO2MAN..LGDEV, inflates its shell data (`zipInflateCodes`),
+enters `uiMain__Fv` and draws 38 textured sprites per frame to `fbp=351`. The screen stayed black.
+
+## Black screen: libgraph image stubs (2026-10-22)
+`PS2X_GS_DUMP` showed the sprites sampling a 128x128 PSMT4 texture at `tbp0=8959` (CLUT `cbp=8991`) that decoded
+to all zeros, while VRAM only had a PSMT4 upload at block 6136. `fontDmaFontData__Fv` uploads the font with
+`sceGsSetDefLoadImage` + `sceGsExecLoadImage` (both bound to runtime HLE by the analyzer). Two bugs in the HLE:
+- `sceGsExecLoadImage` scaled `vram_addr` by 2048/256 as if it were a FRAME.FBP page index; libgraph's `vbp` is
+  already the BITBLTBUF unit (64 words). 8959 x 8 mod 16384 = 6136, exactly where the font landed.
+- `sceGsSetDefLoadImage` wrote a private 12-byte record into the guest `sceGsLoadImage`. The real struct is a
+  6-quadword GIF packet (giftag0, BITBLTBUF, TRXPOS, TRXREG, TRXDIR, giftag1) and the game relies on it:
+  `blitToFrameBuffer` rewrites giftag1 at +0x50 and DMAs the packet itself. `fontInit` spaces its two structs
+  0x60 bytes apart, which pins the size (a first attempt with 0x70 clobbered the glyph UV table that follows).
+Fixed in the fork (`Kernel/Stubs/GS.cpp`, `Helpers/Support.h`): real layouts for load and store, Exec stubs read
+BITBLTBUF/TRXPOS/TRXREG back from the packet, no unit conversion. Result: the PAL language selection screen
+(ENGLISH / FRANCAIS / ESPANOL / DEUTSCH / ITALIANO) renders correctly and waits for input (`inputAnyKey__Fi`).
+
+Also in the fork: `PS2X_GS_LOG_LIMIT=<n>` raises the 48/128 caps on the `[gs:gif]`/`[gs:reg]` logs.
+
 ## Open
-- Verify the boot continues past `inputInit` with the stubs (rebuild in progress).
-- No frame was presented in the first 60 s (`PS2X_CAPTURE_DIR` wrote nothing).
+- Drive the language screen with `PS2X_PAD_SCRIPT` and see how far the logos / intro movie / title get.
+- `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
+  real frame rate once there is motion on screen.
+- USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
