@@ -210,9 +210,34 @@ ground ("CAR TELEPORTED"), and AI cars printed "Skid plate collision returned ne
   without a limit: 80-100 ms per frame at the current speed instead of 20. `timerEndOfRealTimeProcessing` is
   overridden to cap it at 40 ms (`TMB_MAX_FRAME_MS`): below 25 fps the game runs in slow motion.
 
+## GS rasterizer and VU flags, where the time goes now (2026-10-23)
+`PS2X_GS_RECORD=<file>` (fork) records the GS command stream in the game; `ps2_gs_replay <file> [repeat]` times
+it and prints a hash of the final VRAM, so a rasterizer change can be checked bit for bit. On 96 match frames
+(`build/gs_match.trace`):
+- 4 workers 4.35 s -> 2.1 s, serial 8.8 s -> about 6 s, VRAM identical throughout.
+- The workers sat idle 1.5 s of the 4.35: TMB keeps its 8-bit textures (T8H, T4HL) in the top byte of its Z24 and
+  CT24 buffers, which 24-bit writes never touch, but the overlap checks counted those primitives as sampling what
+  they draw and drew them serially. The checks now know which byte each format reads and writes.
+- 248,000 CLUT loads (one per primitive, 92% repeating the previous one) were made by every worker and dropped
+  the cached palettes: repeats are now skipped and CLUT serials identify contents.
+- Workers own whole pages (a bounding box test skips most small triangles).
+
+In the game this changed nothing: the workers were already half idle. The EE thread is the limit, 75% of it in
+VU microcode:
+- The SIMD flag fast path had lost its handling of zero results (an edit gone wrong), so every zero result took
+  the scalar long double path: 15% of the thread. Restored; the VU1 replay went from 40.9 to 28.3 ns per VU cycle.
+- VU0 microprograms ran with a 4096-cycle limit taken for a time slice, so each pair kept the previous value of
+  the registers it writes (7%). Now a run-to-completion limit.
+- The VU1 microcode compiled ahead of time was built inside two unity batches at -O2 with debug info (20 minutes
+  each): source properties are scoped by directory and `ps2EntryRunner` is created under PS2Recomp. Set with
+  `TARGET_DIRECTORY` now: -O3 without debug info, a few minutes for the whole rebuild.
+
+Match with the car idle: 14-17 fps (12-14 before). The EE thread is still saturated: VU1 about 65% of it, the IOP
+12%, the game code 4%. Running VU1 on its own thread, as the hardware does, is the next step.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
-- Speed (GS rasterizer), sound output, controls in the match, memory card.
+- Speed (VU1 on the EE thread), sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.

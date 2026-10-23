@@ -34,10 +34,14 @@ file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.c
 
 # VU1 microcode compiled ahead of time by ps2_vu_aot (scripts/recomp.sh). -O3 unrolls the operand loops over each
 # pair's constexpr decode; debug info is of no use for it and triples its build time.
+# Source properties are scoped by directory: ps2EntryRunner is created under PS2Recomp, so they are set for its
+# directory too (without TARGET_DIRECTORY the microcode ended up in two unity batches at -O2 with debug info).
 file(GLOB TMB_VU1_AOT_SOURCES CONFIGURE_DEPENDS "${TMB_GENERATED_DIR}/vu1/*.cpp")
-set_source_files_properties(${TMB_VU1_AOT_SOURCES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+set_source_files_properties(${TMB_VU1_AOT_SOURCES} DIRECTORY . TARGET_DIRECTORY ps2EntryRunner
+                            PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(${TMB_VU1_AOT_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-g0")
+    set_source_files_properties(${TMB_VU1_AOT_SOURCES} DIRECTORY . TARGET_DIRECTORY ps2EntryRunner
+                                PROPERTIES COMPILE_OPTIONS "-O3;-g0")
 endif()
 
 target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_VU1_AOT_SOURCES} ${TMB_RUNTIME_SOURCES})

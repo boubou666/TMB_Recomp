@@ -24,7 +24,7 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
 plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD) at
-about 10 to 13 frames per second, bound by the software rasterizer. Sound, full speed and controls in the match are
+about 14 to 17 frames per second, bound by the VU1 microcode running on the game thread. Sound, full speed and controls in the match are
 being worked on.
 
 | Milestone | |
