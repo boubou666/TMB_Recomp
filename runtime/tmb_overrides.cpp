@@ -5,6 +5,7 @@
 #include "ps2_recompiled_functions.h"
 #include "Stubs/MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
 #include <string>
 #include <thread>
@@ -281,6 +282,13 @@ namespace
 
     void applyTmb(PS2Runtime &runtime)
     {
+        // The match is bound by the software rasterizer: draw on worker threads (TMB_GS_SERIAL=1 keeps the GS
+        // thread alone). Four workers beat eight here, every worker sets up each of the many small triangles.
+        if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
+        {
+            setenv("PS2X_GS_RASTER_THREADS", "4", 0);
+            GSCpuBackend::SetAsyncRasterization(true);
+        }
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);

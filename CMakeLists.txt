@@ -32,8 +32,23 @@ set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
 
 file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
 
-target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_RUNTIME_SOURCES})
+# VU1 microcode compiled ahead of time by ps2_vu_aot (scripts/recomp.sh). -O3 unrolls the operand loops over each
+# pair's constexpr decode; debug info is of no use for it and triples its build time.
+file(GLOB TMB_VU1_AOT_SOURCES CONFIGURE_DEPENDS "${TMB_GENERATED_DIR}/vu1/*.cpp")
+set_source_files_properties(${TMB_VU1_AOT_SOURCES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(${TMB_VU1_AOT_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-g0")
+endif()
+
+target_sources(ps2EntryRunner PRIVATE ${TMB_GENERATED_SOURCES} ${TMB_VU1_AOT_SOURCES} ${TMB_RUNTIME_SOURCES})
 target_include_directories(ps2EntryRunner PRIVATE "${TMB_GENERATED_DIR}")
 
 list(LENGTH TMB_GENERATED_SOURCES _tmb_count)
 message(STATUS "TMB_Recomp: linking ${_tmb_count} generated source files from ${TMB_GENERATED_DIR}")
+
+# The VU1 replay tool with the compiled microcode linked in: checks it against runs recorded with
+# PS2X_VU1_RECORD (build/game/tmb_vu1_replay <trace> [repeat]).
+if(TMB_VU1_AOT_SOURCES)
+    add_executable(tmb_vu1_replay PS2Recomp/ps2xRuntime/tools/ps2_vu1_replay.cpp ${TMB_VU1_AOT_SOURCES})
+    target_link_libraries(tmb_vu1_replay PRIVATE ps2_runtime)
+endif()

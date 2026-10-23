@@ -24,7 +24,8 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
 plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD) at
-about 26 frames per second. Sound, full speed and controls in the match are being worked on.
+about 10 to 13 frames per second, bound by the software rasterizer. Sound, full speed and controls in the match are
+being worked on.
 
 | Milestone | |
 |---|:---:|
@@ -91,8 +92,8 @@ the GCC/Clang build flags for the runtime's AVX2 code.
 git clone --recurse-submodules https://github.com/boubou666/TMB_Recomp.git
 cd TMB_Recomp
 scripts/extract_iso.sh "/path/to/Twisted Metal - Black (Europe).iso"   # disc files -> game/
-scripts/build_tools.sh                                                  # ps2_recomp + ps2_analyzer -> build/tools
-scripts/recomp.sh                                                       # ELF + recomp/tmb_sces50360.toml -> generated/
+scripts/build_tools.sh                                                  # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
+scripts/recomp.sh                                                       # ELF + recomp/tmb_sces50360.toml -> generated/ (VU1 microcode -> generated/vu1/)
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game
 scripts/run.sh                                                          # ps2EntryRunner game/SCES_503.60
 ```
@@ -126,7 +127,9 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 |---|---|
 | `PS2X_CAPTURE_DIR=<dir>`, `PS2X_CAPTURE_INTERVAL=<s>` | Save the presented frame every few seconds (works minimized) |
 | `PS2X_PAD_SCRIPT=t:BUTTON[/ms],…` | Scripted button presses (seconds from start), for unattended runs |
-| `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for the `ps2_vu1_replay` tool |
+| `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for `ps2_vu1_replay` / `build/game/tmb_vu1_replay` (with the compiled microcode) |
+| `PS2X_VU_AOT=0` | Interpret the VU1 microcode instead of running the compiled one |
+| `TMB_GS_SERIAL=1` | Rasterize on the GS thread alone (default: 4 rasterization workers, `PS2X_GS_RASTER_THREADS=<n>`) |
 | `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AFTER=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
 | `PS2X_GS_SYNC=1` | Rasterize on the game thread instead of the GS worker threads |
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |

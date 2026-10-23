@@ -173,9 +173,36 @@ function entry and exit (1.7 GB written in the working directory). The fork now 
 `PS2X_ENABLE_FUNCTION_LOG_TRACKER` (off); the other diagnostic logs stay. The match now runs at about 26 game
 frames per second.
 
+## Speed: the real numbers, VU1 microcode compiled ahead of time (2026-10-23)
+The "26 fps" above was measured on a near-empty view: the car had fallen through the arena ("CAR TELEPORTED").
+In the normal match view the game ran at 7-8 frames per second. Two threads were saturated: the EE thread, 83% of
+it in the VU1 interpreter (about 840,000 instruction pairs and 4,000 microprogram runs per frame), and the GS
+thread in the software rasterizer (about 900,000 pixels per frame).
+
+`perf` works without root (Arch package extracted to `~/.local/opt/perf`, `perf_event_paranoid` 2 allows user-space
+sampling of own processes); a wrapper is in `~/.local/bin/perf`.
+
+VU1, all exact against 8000 runs recorded in the match (`PS2X_VU1_RECORD`, replayed by `ps2_vu1_replay`):
+- the interpreter now shares one inline implementation with compiled code (`ps2_vu1_inline.h`, `stepPair`);
+- FMAC flags: SIMD fast path, exact results of zero/denormal/near-FLT_MAX lanes as doubles;
+- `ps2_vu_aot` (fork, built by `scripts/build_tools.sh`) finds the VIF MPG uploads in the ELF (16 fragments, 3605
+  pairs for TMB, both microcode images) and writes C++ to `generated/vu1/`, one function per pair calling
+  `stepPair` with a constexpr decode. Built at -O3 without debug info and outside the unity batches.
+- 76 ns per VU cycle before, 55 interpreted, about 30 compiled.
+
+The EE thread now runs at about half its former load; the GS thread is the limit. Its existing multi-threaded
+mode (each worker draws the pixels of its VRAM blocks) is now on for TMB with 4 workers: 8.8 fps on the GS thread
+alone, 12.3 with 4 workers, 10.4 with 8 (every worker sets up each of the many small triangles), measured with the
+car idle at the spawn point (`build/bench.sh`, presses stopped once the match starts).
+
+Benchmarks are noisy: in some runs the car falls through the arena. Those runs print "Car N Skid plate collision
+returned negative distance ... of -nan": the distance has exponent 255, a huge value on the PS2 FPU (the runtime
+keeps those semantics), so the source is upstream (data or VU0), not a host NaN. Not tracked down yet.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
-- Speed, sound output, controls in the match, memory card.
+- Speed (GS rasterizer), sound output, controls in the match, memory card.
+- The car sometimes falls through the arena (skid plate distance with exponent 255).
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
