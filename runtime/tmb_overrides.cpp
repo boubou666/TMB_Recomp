@@ -13,6 +13,10 @@
 #include <chrono>
 #include <algorithm>
 
+#include <cmath>
+#include <cstdio>
+#include <vector>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -280,6 +284,61 @@ namespace
                       << " -> " << rd(0x00503CF8u) << "," << rd(0x00503CFCu) << std::endl;
     }
 
+    // The game measures each frame with T0 (BUSCLK/256, 576 ticks per ms) into a global that timerGetFrameTime turns
+    // into milliseconds, and integrates the car physics over it without a limit. Built for 50 fps (20 ms), it blows
+    // up at the 80-100 ms frames of a slow host: cars fly off or fall through the arena. Capped at 40 ms
+    // (TMB_MAX_FRAME_MS), the game runs in slow motion instead when the host cannot keep up.
+    constexpr uint32_t kTimerEndOfRealTimeProcessing = 0x001F7A00u;
+    constexpr int32_t kFrameTicksGpOffset = -0x2BDC; // timerGetFrameTime's tick count (gp-relative)
+    int32_t g_maxFrameTicks = 40 * 576;
+
+    void timerEndOfRealTimeProcessingOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t gp = getRegU32(ctx, 28);
+        timerEndOfRealTimeProcessing__Fv_0x1f7a00(rdram, ctx, runtime);
+        int32_t *frameTicks = reinterpret_cast<int32_t *>(rdram + ((gp + kFrameTicksGpOffset) & 0x1FFFFFFu));
+        if (*frameTicks > g_maxFrameTicks)
+            *frameTicks = g_maxFrameTicks;
+    }
+
+    // TMB_TRACE_BLACKBOX=<file>: the player vehicle (0x259c70, 0x2200 bytes) at every collisCheckHdResults; when its
+    // position goes past 50000 the last 64 frames are written to <file> (bring-up aid for the physics blow-ups).
+    constexpr uint32_t kPlayerVehicle = 0x00259C70u;
+    constexpr uint32_t kVehicleBytes = 0x2200u;
+    constexpr uint32_t kBlackboxFrames = 64u;
+    std::vector<uint8_t> g_blackbox;
+    uint32_t g_blackboxNext = 0;
+    bool g_blackboxDumped = false;
+    const char *g_blackboxPath = nullptr;
+
+    void collisCheckHdResultsBlackbox(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (getRegU32(ctx, 4) == kPlayerVehicle && !g_blackboxDumped)
+        {
+            if (g_blackbox.empty())
+                g_blackbox.resize(kBlackboxFrames * kVehicleBytes);
+            std::memcpy(g_blackbox.data() + (g_blackboxNext % kBlackboxFrames) * kVehicleBytes, rdram + kPlayerVehicle,
+                        kVehicleBytes);
+            ++g_blackboxNext;
+            float pos[3];
+            std::memcpy(pos, rdram + kPlayerVehicle + 0x260u, sizeof(pos));
+            if (!(std::fabs(pos[0]) < 50000.0f && std::fabs(pos[1]) < 50000.0f && std::fabs(pos[2]) < 50000.0f))
+            {
+                g_blackboxDumped = true;
+                if (FILE *out = std::fopen(g_blackboxPath, "wb"))
+                {
+                    for (uint32_t i = 0; i < kBlackboxFrames; ++i)
+                        std::fwrite(g_blackbox.data() + ((g_blackboxNext + i) % kBlackboxFrames) * kVehicleBytes, 1,
+                                    kVehicleBytes, out);
+                    std::fclose(out);
+                }
+                std::fprintf(stderr, "[tmb:blackbox] position %g %g %g at frame %u: dumped\n", pos[0], pos[1], pos[2],
+                             g_blackboxNext);
+            }
+        }
+        collisCheckHdResults__7Vehicle_0x117ad8(rdram, ctx, runtime);
+    }
+
     void applyTmb(PS2Runtime &runtime)
     {
         // The match is bound by the software rasterizer: draw on worker threads (TMB_GS_SERIAL=1 keeps the GS
@@ -298,6 +357,14 @@ namespace
             runtime.registerFunction(kSndSendIopCommandAndWait, &sndSendIopCommandAndWaitTrace);
         }
         runtime.registerFunction(kVideoDecFlush, &videoDecFlushOverride);
+        if (const char *maxMs = std::getenv("TMB_MAX_FRAME_MS"); maxMs && *maxMs)
+            g_maxFrameTicks = std::max(1, std::atoi(maxMs)) * 576;
+        runtime.registerFunction(kTimerEndOfRealTimeProcessing, &timerEndOfRealTimeProcessingOverride);
+        if (const char *path = std::getenv("TMB_TRACE_BLACKBOX"); path && *path)
+        {
+            g_blackboxPath = path;
+            runtime.registerFunction(0x00117AD8u, &collisCheckHdResultsBlackbox);
+        }
         if (const char *period = std::getenv("TMB_TRACE_THREADS"); period && *period)
         {
             startThreadTrace(runtime, std::max(0.5, std::atof(period)));

@@ -195,14 +195,24 @@ mode (each worker draws the pixels of its VRAM blocks) is now on for TMB with 4 
 alone, 12.3 with 4 workers, 10.4 with 8 (every worker sets up each of the many small triangles), measured with the
 car idle at the spawn point (`build/bench.sh`, presses stopped once the match starts).
 
-Benchmarks are noisy: in some runs the car falls through the arena. Those runs print "Car N Skid plate collision
-returned negative distance ... of -nan": the distance has exponent 255, a huge value on the PS2 FPU (the runtime
-keeps those semantics), so the source is upstream (data or VU0), not a host NaN. Not tracked down yet.
+## Cars flying off and sinking through the arena (2026-10-23)
+In about half the runs the player's car, idle at the spawn point, was flung kilometres away or sank through the
+ground ("CAR TELEPORTED"), and AI cars printed "Skid plate collision returned negative distance ... of -nan".
+- The "-nan" was the printf HLE: it read a double passed in a3 from t0/t1 (O32 slot rule). The EE passes each
+  argument in one 64-bit register; fixed in the fork. The distances were ordinary negative numbers.
+- `TMB_TRACE_BLACKBOX=<file>` (runtime/tmb_overrides.cpp) keeps the player vehicle (0x259c70, 0x2200 bytes) of the
+  last 64 frames and writes them once its position goes past 50000. The first bad field was the third row of its
+  rotation matrix (+0xF0): (0.149, -0.989, 537200) instead of about (0, 0, 1), i.e. a row divided by 1.86e-6.
+- `mathfNormalize` computes the length with newlib's inline `sqrt.s $f1, $f12` after summing x*x + y*y in $f0. On
+  the EE, SQRT.S takes its operand from ft; the recompiler took fs, so the length lacked the z term. Fixed in the
+  fork (33 sites in TMB). Six runs since: no blow-up.
+- The game also integrates its physics over the measured frame time (T0 at 576 ticks per ms, `timerGetFrameTime`)
+  without a limit: 80-100 ms per frame at the current speed instead of 20. `timerEndOfRealTimeProcessing` is
+  overridden to cap it at 40 ms (`TMB_MAX_FRAME_MS`): below 25 fps the game runs in slow motion.
 
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (GS rasterizer), sound output, controls in the match, memory card.
-- The car sometimes falls through the arena (skid plate distance with exponent 255).
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
