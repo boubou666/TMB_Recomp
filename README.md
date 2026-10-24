@@ -24,7 +24,7 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
 plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD) at
-about 14 to 17 frames per second, bound by the VU1 microcode running on the game thread. Sound, full speed and controls in the match are
+about 15 to 18 frames per second, bound by the VU1 microcode. Sound, full speed and controls in the match are
 being worked on.
 
 | Milestone | |
@@ -132,6 +132,8 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `TMB_MAX_FRAME_MS=<ms>` | Longest frame the game's physics integrates over (default 40; slow motion below 25 fps) |
 | `TMB_TRACE_BLACKBOX=<file>` | Dump the player vehicle's last 64 frames when its position goes wild |
 | `TMB_GS_SERIAL=1` | Rasterize on the GS thread alone (default: 4 rasterization workers, `PS2X_GS_RASTER_THREADS=<n>`) |
+| `TMB_VIF1_SERIAL=1` | Run VIF1 and the VU1 microcode on the game thread (default: their own thread) |
+| `PS2X_GS_RECORD=<file>`, `PS2X_GS_RECORD_AT=<s>`, `PS2X_GS_RECORD_SECONDS=<s>` | Record the GS command stream for `ps2_gs_replay` (rasterizer timing, VRAM hash) |
 | `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AFTER=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
 | `PS2X_GS_SYNC=1` | Rasterize on the game thread instead of the GS worker threads |
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |

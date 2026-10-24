@@ -341,13 +341,16 @@ namespace
 
     void applyTmb(PS2Runtime &runtime)
     {
-        // The match is bound by the software rasterizer: draw on worker threads (TMB_GS_SERIAL=1 keeps the GS
-        // thread alone). Four workers beat eight here, every worker sets up each of the many small triangles.
+        // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {
             setenv("PS2X_GS_RASTER_THREADS", "4", 0);
             GSCpuBackend::SetAsyncRasterization(true);
         }
+        // VIF1 and the VU1 microcode (two thirds of the game thread in the match) run on their own thread
+        // (TMB_VIF1_SERIAL=1 keeps them on the game thread). The game waits for them in sceGsSyncPath each frame.
+        if (const char *serial = std::getenv("TMB_VIF1_SERIAL"); !(serial && *serial == '1'))
+            runtime.memory().setVif1Threaded(true);
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);

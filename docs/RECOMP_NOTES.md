@@ -235,6 +235,25 @@ VU microcode:
 Match with the car idle: 14-17 fps (12-14 before). The EE thread is still saturated: VU1 about 65% of it, the IOP
 12%, the game code 4%. Running VU1 on its own thread, as the hardware does, is the next step.
 
+## VIF1 and VU1 on their own thread (2026-10-24)
+The VIF1 DMA transfers (unpacks, VU1 microprograms, PATH1/PATH2 packets) now run on a worker thread (fork,
+`PS2Memory::setVif1Threaded`, on for TMB; `TMB_VIF1_SERIAL=1` keeps them on the game thread). A transfer completes at
+once for the game, its data copied when it starts; whatever observes VIF1, VU1 or the GS waits for the queue first.
+
+Measured before writing it, with counters on every such access in the match: about 3,200 VIF1 transfers per second
+(the `hier` renderer kicks one per object; `hierDmaHandler`, the channel 1 interrupt, kicks the next), the EE never
+reads VU1 memory, and the only accesses that would wait are the VIF/GIF status reads of `sceGsSyncPath`, which `hier`
+calls at the start of each frame for the previous one. A simulation of the timeline predicted the game thread at 0.71
+of its time.
+
+Result: about 15% more frames, counted in the same run with the worker switched on and off every 2 seconds (in-game
+fps from run to run varies too much: the scene, the AI's arrival, and this laptop's temperature, 84 C under load).
+The worker is now the limit (about 80% busy, the game thread waits 40% of its time in `sceGsSyncPath`): VU1 itself
+costs about 60% of a frame, and runs about 10% slower on the worker than on the game thread.
+
+Build note: a `GAME_DONE` marker in a log reused between builds can be read before the new build truncates it; wait on
+the build process or unit, not on the log.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on the EE thread), sound output, controls in the match, memory card.
