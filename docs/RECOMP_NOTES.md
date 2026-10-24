@@ -315,6 +315,14 @@ in three runs. With the lag the only wait left on the game thread is the frame b
 the worker is about 90% busy, a tenth of it latching the presented frame (the backend flush and the copy of the
 display buffer). The next limits are the worker itself and the GS thread behind it.
 
+Follow-ups: the presentation latch now runs on the GS thread (the worker only takes the display registers, in
+queue order), and compiled VU1 blocks read operands an FMAC instruction of the block wrote without normalizing
+them again (2.7% fewer instructions on the replay, exact). Lag A/B after the latch move: +5% (the machine was
+throttling and busy with other programs that day: compare runs only within one run).
+
+Measuring on this laptop: after a long build it throttles (2.5 GHz instead of 4) and pages the swap back in for a
+while; `perf stat` cycles and instructions compare builds better than milliseconds then.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
