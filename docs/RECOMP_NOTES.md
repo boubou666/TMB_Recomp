@@ -269,9 +269,31 @@ once the tool's own copies are left out (it copies 48 KB of VU memory per run, 8
   emulation at about 100 host cycles cannot get there. That takes a real VU recompiler (flag liveness, timing
   computed per block, values kept in host registers), a project of its own.
 
+## VU1 compiled per block (2026-10-24)
+`ps2_vu_aot` now cuts the microcode into straight-line blocks (fork, `VU1Interpreter::planBlock` / `runBlock`).
+At compile time `planBlock` works out the cycle each pair of a block issues at, assuming every value from before the
+block is ready, and which FMAC flag writes nothing in the block reads before the next one lands. At run time the
+block checks those values once: one read by the first pair only that is late moves the whole schedule (the loop
+case: the first pair reads what the previous iteration wrote), any other late value falls back to the per-pair path.
+Results are exact on the 8000 recorded runs (same values, same cycles).
+
+`tmb_vu1_replay`, per pass: 82 ms before, 84-90 ms with blocks alone (their checks cost what they saved), 78 ms with
+dead flag writes dropped, 71 ms with the first-pair delay (most blocks fell back without it), 63 ms with one vector
+blend per destination mask and the remaining slow flag cases (products outside the normal range, sums above
+FLT_MAX) classified in the fast path. Match with the car idle: about 22 fps (the last 300 flips of `build/bench.sh`).
+
+What a pair still costs (about 200 host instructions): normalizing the operands (denormals to zero, exponent 255 to
+FLT_MAX), the PS2 addition (operand alignment without guard bits), flags, and the per-pair bookkeeping (readiness
+tables, cycle, pc). Each is a few percent.
+
+Build: the microcode is an object library both `ps2EntryRunner` and `tmb_vu1_replay` link, at most 4 files at once
+(about 26 GB at peak, 10 minutes). Inlining whole blocks into one function took GCC 9.7 GB per file and got the build
+killed by systemd-oomd, hence one function per pair body. After a fork update, regenerate with `scripts/recomp.sh`
+(after `scripts/build_tools.sh`) so the microcode files match the planner.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
-- Speed (VU1 on the EE thread), sound output, controls in the match, memory card.
+- Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
