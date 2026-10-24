@@ -140,21 +140,36 @@ namespace
     // The GS lag (fork, PS2Memory::setGsLag: the GS and VU1 may finish a frame while the game runs the next) is
     // off while a movie plays: the main thread then waits for the decoder in a loop that only rotates the
     // priority-1 ready queue (switchThread) at priority 0, and running ahead it gets there before the decode
-    // threads (priority 1) have queued their last pictures, which then never run. TMB_GS_LAG_AB=1 switches it on
-    // and off every 100 vblanks instead (measurements).
+    // threads (priority 1) have queued their last pictures, which then never run. The movie flag is `displaying`
+    // (gp-0x340C). The vblank handler, which only runs while movies play, turns the lag off; hier (each frame of
+    // 3D rendering) turns it back on when no movie plays. TMB_GS_LAG_AB=1 switches it on and off every 100
+    // vblanks instead (measurements).
+    constexpr uint32_t kMovieDisplaying = 0x00506FF0u - 0x340Cu;
+    constexpr uint32_t kHier = 0x001D40B0u;
+
+    void updateGsLag(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        if (!g_gsLag)
+            return;
+        bool lag = *reinterpret_cast<const int32_t *>(rdram + kMovieDisplaying) == 0;
+        if (g_gsLagAb)
+            lag = lag && (runtime->eeScheduler().currentVSyncTick() / 100u) % 2u == 0u;
+        runtime->memory().setGsLag(lag);
+    }
+
+    void hierOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        updateGsLag(rdram, runtime);
+        hier__Fi_0x1d40b0(rdram, ctx, runtime);
+    }
+
     void vblankHandlerOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t gp = getRegU32(ctx, 28);
         const auto rd = [&](uint32_t addr) { return *reinterpret_cast<const int32_t *>(rdram + (addr & 0x1FFFFFFu)); };
         const int32_t displaying = rd(gp - 0x340Cu);
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
-        if (g_gsLag)
-        {
-            bool lag = displaying == 0;
-            if (g_gsLagAb)
-                lag = lag && (runtime->eeScheduler().currentVSyncTick() / 100u) % 2u == 0u;
-            runtime->memory().setGsLag(lag);
-        }
+        updateGsLag(rdram, runtime);
         if (!g_traceMovie)
             return;
         static uint32_t s_dispCalls = 0;
@@ -375,6 +390,7 @@ namespace
             g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
         }
         runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
+        runtime.registerFunction(kHier, &hierOverride);
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);

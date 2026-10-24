@@ -355,6 +355,11 @@ VU0 went from about a third of the game thread to a sixth. `PS2X_VU0_CHECK=1` ru
 interpreter too and compares (5.36M calls in a match, no difference). The game thread is now led by the IOP
 emulation (~25%), then the game code (~17%).
 
+The GS lag never ran in the match until now: it was turned on by the game's vblank handler, which only runs
+while movies play, and the last movie left it off. `hier` (each frame of 3D rendering) now turns it on when no
+movie plays. Measured in the same run (`TMB_GS_LAG_AB=1`, lag really on in its windows): 26.5 fps against 22.2,
++19%. The earlier +4..10% A/B results were noise.
+
 Frame rate in this game is quantized by the vblank wait: a frame takes 1 vblank (50 fps) or 2 (25 fps). With
 both main threads around 26 ms per frame most frames take 2; every thread has to fit in 20 ms. Whole-run fps
 varies a lot between runs (scene, AI, heat): compare per-thread busy time, or in-run A/B.
