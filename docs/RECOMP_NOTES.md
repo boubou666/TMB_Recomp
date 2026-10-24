@@ -370,6 +370,19 @@ varies a lot between runs (scene, AI, heat): compare per-thread busy time, or in
 The relaxed float mode (`PS2X_VU_AOT_RELAXED=1` when generating; `ps2_vu1_replay --tolerance`) only gains ~12% of
 the replay's cycles: float arithmetic is no longer what recompiled blocks spend their time on.
 
+## Menus: the picture layer was 96 lines too high (2026-10-25)
+Compared with screenshots of the real game: in the title and vehicle menus the background picture sat too high,
+its torn edges cutting through the menu text. The menus use both display circuits (PMODE 0xFF03): the UI layer
+(circuit 1, 640x512 at DY 50) over the picture (circuit 2, 640x368 at DY 146). The fork's presentation merged
+them both from the top left, ignoring DISPLAY DX/DY; each now starts at its own position.
+
+Still different: the level intro screen leaves out the character's monologue text and moves on to loading after
+about 6 s. The real screen probably lasts as long as the narration; with no sound output yet, to be checked with
+the sound work.
+
+GS raster (fork, ported from two other forks by a background agent, bit-exact on `gs_match.trace`): depth test
+before texture sampling and shading in blocks of eight pixels, 24% fewer cycles for the rasterizers.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
