@@ -349,6 +349,16 @@ distance gave ~FLT_MAX and every vertex in front of a headlight clamped to white
 real spotlight in slot 1: 29% -> 0. The replay reference is now `build/vu1_match2.trace` (20000 runs recorded with
 the fix and the recompiler, matching the interpreter); `vu1_match.trace` predates the fix.
 
+VU0: TMB runs one VU0 program (two MPG fragments, pairs 0..390, from the ELF through VIF0), about 23000 calls a
+second. `ps2_vu_aot` now also builds fragments that fit VU0 code memory as VU0 code, and the runtime uses them:
+VU0 went from about a third of the game thread to a sixth. `PS2X_VU0_CHECK=1` runs each call through the
+interpreter too and compares (5.36M calls in a match, no difference). The game thread is now led by the IOP
+emulation (~25%), then the game code (~17%).
+
+Frame rate in this game is quantized by the vblank wait: a frame takes 1 vblank (50 fps) or 2 (25 fps). With
+both main threads around 26 ms per frame most frames take 2; every thread has to fit in 20 ms. Whole-run fps
+varies a lot between runs (scene, AI, heat): compare per-thread busy time, or in-run A/B.
+
 The relaxed float mode (`PS2X_VU_AOT_RELAXED=1` when generating; `ps2_vu1_replay --tolerance`) only gains ~12% of
 the replay's cycles: float arithmetic is no longer what recompiled blocks spend their time on.
 
