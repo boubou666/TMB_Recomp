@@ -317,9 +317,9 @@ namespace
     }
 
     // The game measures each frame with T0 (BUSCLK/256, 576 ticks per ms) into a global that timerGetFrameTime turns
-    // into milliseconds, and integrates the car physics over it without a limit. Built for 50 fps (20 ms), it blows
-    // up at the 80-100 ms frames of a slow host: cars fly off or fall through the arena. Capped at 40 ms
-    // (TMB_MAX_FRAME_MS), the game runs in slow motion instead when the host cannot keep up.
+    // into milliseconds, and moves weapons and debris over it without a limit. Built for 50 fps (20 ms), it blows
+    // up at the 80-100 ms frames of a slow host. Capped at 40 ms (TMB_MAX_FRAME_MS), they move in slow motion
+    // instead when the host cannot keep up. (The cars use the vblank fields: theGameUpdateOverride below.)
     constexpr uint32_t kTimerEndOfRealTimeProcessing = 0x001F7A00u;
     constexpr int32_t kFrameTicksGpOffset = -0x2BDC; // timerGetFrameTime's tick count (gp-relative)
     int32_t g_maxFrameTicks = 40 * 576;
@@ -333,6 +333,86 @@ namespace
             *frameTicks = g_maxFrameTicks;
     }
 
+    // TheGame::Update moves each car by its velocity times the vblank fields since the previous frame
+    // (timerGetFieldsLastFrame, copied to vehicle+0x20C8) and tests the collisions once, after the move. Built for
+    // 50 fps (one field per frame, two when the PS2 is overloaded), at the two to four fields of a slow host each
+    // step goes two to four times as far, and fast cars landing or hitting a slope go through the ground (bots fall
+    // under the arena until the game teleports them back). Run it once per field instead, the fields, update rate
+    // and frame time (weapons, debris) split over the steps, at most TMB_SUBSTEPS (default 4, 1 disables) steps.
+    // Update ends in a tail call and may be preempted, so each step returns through the dispatcher to
+    // kSubstepReturn (padding between two functions, never executed), which starts the next one.
+    constexpr uint32_t kTheGameUpdate = 0x0012FBA8u;
+    constexpr uint32_t kSubstepReturn = 0x0012FBA4u;
+    constexpr int32_t kFieldsLastFrameGpOffset = -0x2BF0;
+    constexpr int32_t kUpdateRateGpOffset = -0x2BEC;
+    constexpr int32_t kFieldRateGpOffset = -0x2BD0; // fields per second (50)
+    int32_t g_maxSubsteps = 4;
+
+    struct Substeps
+    {
+        int32_t step = 0, steps = 0;
+        int32_t totalFields = 0, totalRate = 0, totalTicks = 0, ticksDone = 0;
+        uint32_t self = 0, ret = 0, gp = 0;
+    } g_substeps;
+
+    int32_t *gpGlobal(uint8_t *rdram, int32_t offset)
+    {
+        return reinterpret_cast<int32_t *>(rdram + ((g_substeps.gp + offset) & 0x1FFFFFFu));
+    }
+
+    void runSubstep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        Substeps &s = g_substeps;
+        const int32_t fields = s.step + 1 < s.steps ? 1 : s.totalFields - (s.steps - 1);
+        *gpGlobal(rdram, kFieldsLastFrameGpOffset) = fields;
+        *gpGlobal(rdram, kUpdateRateGpOffset) = std::max(1, *gpGlobal(rdram, kFieldRateGpOffset) / fields);
+        const int32_t ticks = static_cast<int32_t>(static_cast<int64_t>(s.totalTicks) * (s.step + 1) / s.steps) - s.ticksDone;
+        s.ticksDone += ticks;
+        *gpGlobal(rdram, kFrameTicksGpOffset) = ticks;
+        SET_GPR_U32(ctx, 4, s.self);
+        SET_GPR_U32(ctx, 31, kSubstepReturn);
+        ctx->pc = kTheGameUpdate;
+        Update__7TheGame_0x12fba8(rdram, ctx, runtime);
+    }
+
+    void substepReturn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        Substeps &s = g_substeps;
+        if (++s.step < s.steps)
+        {
+            runSubstep(rdram, ctx, runtime);
+            return;
+        }
+        *gpGlobal(rdram, kFieldsLastFrameGpOffset) = s.totalFields;
+        *gpGlobal(rdram, kUpdateRateGpOffset) = s.totalRate;
+        *gpGlobal(rdram, kFrameTicksGpOffset) = s.totalTicks;
+        s.steps = 0;
+        SET_GPR_U32(ctx, 31, s.ret);
+        ctx->pc = s.ret;
+    }
+
+    void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        Substeps &s = g_substeps;
+        s.gp = getRegU32(ctx, 28);
+        const int32_t fields = *gpGlobal(rdram, kFieldsLastFrameGpOffset);
+        const int32_t steps = std::min(fields, g_maxSubsteps);
+        if (steps <= 1 || s.steps != 0)
+        {
+            Update__7TheGame_0x12fba8(rdram, ctx, runtime);
+            return;
+        }
+        s.step = 0;
+        s.steps = steps;
+        s.totalFields = fields;
+        s.totalRate = *gpGlobal(rdram, kUpdateRateGpOffset);
+        s.totalTicks = *gpGlobal(rdram, kFrameTicksGpOffset);
+        s.ticksDone = 0;
+        s.self = getRegU32(ctx, 4);
+        s.ret = getRegU32(ctx, 31);
+        runSubstep(rdram, ctx, runtime);
+    }
+
     // TMB_TRACE_BLACKBOX=<file>: the player vehicle (0x259c70, 0x2200 bytes) at every collisCheckHdResults; when its
     // position goes past 50000 the last 64 frames are written to <file> (bring-up aid for the physics blow-ups).
     constexpr uint32_t kPlayerVehicle = 0x00259C70u;
@@ -343,9 +423,22 @@ namespace
     bool g_blackboxDumped = false;
     const char *g_blackboxPath = nullptr;
 
+    // TMB_TRACE_POS=<file>: every vehicle's position (+0x260) at each collisCheckHdResults, one line per call (vsync
+    // tick, vehicle, x, y, z): falls through the ground show as the height dropping under the terrain's.
+    FILE *g_posTrace = nullptr;
+
     void collisCheckHdResultsBlackbox(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (getRegU32(ctx, 4) == kPlayerVehicle && !g_blackboxDumped)
+        if (g_posTrace)
+        {
+            const uint32_t vehicle = getRegU32(ctx, 4);
+            float p[3];
+            std::memcpy(p, rdram + ((vehicle + 0x260u) & 0x1FFFFFFu), sizeof(p));
+            std::fprintf(g_posTrace, "%llu %x %.2f %.2f %.2f\n",
+                         static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()), vehicle, p[0], p[1],
+                         p[2]);
+        }
+        if (g_blackboxPath && getRegU32(ctx, 4) == kPlayerVehicle && !g_blackboxDumped)
         {
             if (g_blackbox.empty())
                 g_blackbox.resize(kBlackboxFrames * kVehicleBytes);
@@ -405,11 +498,17 @@ namespace
         if (const char *maxMs = std::getenv("TMB_MAX_FRAME_MS"); maxMs && *maxMs)
             g_maxFrameTicks = std::max(1, std::atoi(maxMs)) * 576;
         runtime.registerFunction(kTimerEndOfRealTimeProcessing, &timerEndOfRealTimeProcessingOverride);
+        if (const char *substeps = std::getenv("TMB_SUBSTEPS"); substeps && *substeps)
+            g_maxSubsteps = std::max(1, std::atoi(substeps));
+        runtime.registerFunction(kTheGameUpdate, &theGameUpdateOverride);
+        runtime.registerFunction(kSubstepReturn, &substepReturn);
         if (const char *path = std::getenv("TMB_TRACE_BLACKBOX"); path && *path)
-        {
             g_blackboxPath = path;
+        if (const char *path = std::getenv("TMB_TRACE_POS"); path && *path)
+            if ((g_posTrace = std::fopen(path, "w")))
+                std::setvbuf(g_posTrace, nullptr, _IOLBF, 0);
+        if (g_blackboxPath || g_posTrace)
             runtime.registerFunction(0x00117AD8u, &collisCheckHdResultsBlackbox);
-        }
         if (const char *period = std::getenv("TMB_TRACE_THREADS"); period && *period)
         {
             startThreadTrace(runtime, std::max(0.5, std::atof(period)));

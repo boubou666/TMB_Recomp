@@ -383,6 +383,26 @@ the sound work.
 GS raster (fork, ported from two other forks by a background agent, bit-exact on `gs_match.trace`): depth test
 before texture sampling and shading in blocks of eight pixels, 24% fewer cycles for the rasterizers.
 
+## Falling through the ground (2026-10-25)
+The player still went through the ground at times, mostly in fast collisions or at some angles, and bots fell
+under the arena until the game teleported them back. `TMB_TRACE_POS=<file>` now writes every vehicle's position
+(+0x260, z up) with the vblank tick at each `collisCheckHdResults`; `scripts/bots.sh <name>` runs the first match
+with the player idle and `tools/falls.py` counts the vehicles going under z -100 (the quarry floor is at -86).
+- The cars do not move over the frame time (that is weapons and debris, see above) but over the vblank fields
+  since the previous frame: `timerWaitForMinUpdateRate` stores them (gp-0x2BF0, 1 to 15), `vehicleUpdate` copies
+  them to vehicle+0x20C8 and `vehicleUpdatePosition` adds the velocity that many times before the collision test,
+  done once per frame. The PS2 runs the match at 50 fps (one field); here a frame takes 2 to 4 fields, so each
+  step went 2 to 4 times as far and fast cars landing on a slope ended up under it. Baseline: 11 falls in 19371
+  vblanks of match.
+- `TheGame::Update` (0x12fba8) is overridden to run once per field (at most `TMB_SUBSTEPS`, default 4), with the
+  fields, the update rate (gp-0x2BEC) and the frame time split over the steps. Update ends in a tail call and may
+  be preempted, so each step returns through the dispatcher to 0x12fba4 (padding before Update), registered to
+  start the next step. 0 falls in 25857 vblanks, no measurable cost.
+- Found on the way, fixed in the fork: the macro VU0 instructions VLQI/VSQI/VLQD/VSQD used EE RAM instead of
+  VU0 data memory, and VSQI swapped its fields. TMB's matrix stack (`hierPutMatStackAsm`/`hierGetMatStackAsm`)
+  wrote vf10 three times into low EE RAM and bumped vi11/vi12; VDIV by zero gave 0 instead of +-max
+  (`bspInterp`).
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
