@@ -323,6 +323,29 @@ throttling and busy with other programs that day: compare runs only within one r
 Measuring on this laptop: after a long build it throttles (2.5 GHz instead of 4) and pages the swap back in for a
 while; `perf stat` cycles and instructions compare builds better than milliseconds then.
 
+## VU1 recompiler (2026-10-24)
+Target: 50 fps in the match, so every thread under 20 ms per frame. At about 20 fps the VIF1/VU1 worker took
+~43 ms per frame, the game thread ~28 ms (VU0 interpreter 38%, IOP emulation 19%, game code 11%), the GS raster
+workers ~20 ms. Micro-optimizing the per-pair emulation had run out (a few percent per change: flags were already
+mostly skipped by the compiler once dead, removing instructions no longer removed cycles).
+
+The fork's `ps2_vu_aot` now compiles each block into one function with the VU registers in locals and one inline
+helper per instruction (`ps2_vu1_jit.h`), still bit-exact: the recorded runs match, and so do 30000 runs recorded
+in the game with the recompiler and replayed through the interpreter (`PS2X_VU_AOT=0` turns all compiled
+microcode off). Replay 1.5x faster than the per-pair code, 4x the interpreter; match about 27 fps. A microcode
+file builds in ~20 s (pairs inside recompiled blocks are no longer compiled one by one), the whole microcode in
+under 3 minutes instead of 25.
+
+Next for VU1: pairs that still run alone through the interpreter when a block cannot start (5% of the replay), and
+a relaxed float mode (no PS2 operand truncation or operand normalization, results clamped) checked with a
+tolerance on the replay's PATH1 packets. Then VU0 through the same recompiler, the IOP on its own thread, and the
+GS raster workers.
+
+Lighting flicker reported in the match (surfaces lighting up with the camera angle): the GS draws what it gets;
+the vertex colours themselves switch between their value and 255 from frame to frame on a still camera, whole
+VU1 batches at a time. Either the light data the game builds per object (`plight*`, `hierLightNode`, VU0 macro
+code) or registers a microprogram reads before setting. To be traced with `PS2X_GS_RECORD` + `PS2X_VU1_RECORD`.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
