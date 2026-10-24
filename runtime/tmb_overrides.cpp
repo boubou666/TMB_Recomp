@@ -133,13 +133,30 @@ namespace
 
     constexpr uint32_t kVblankHandler = 0x001C2898u;
     uint32_t g_vblankCalls = 0;
+    bool g_gsLag = false;
+    bool g_gsLagAb = false;
+    bool g_traceMovie = false;
 
-    void vblankHandlerTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    // The GS lag (fork, PS2Memory::setGsLag: the GS and VU1 may finish a frame while the game runs the next) is
+    // off while a movie plays: the main thread then waits for the decoder in a loop that only rotates the
+    // priority-1 ready queue (switchThread) at priority 0, and running ahead it gets there before the decode
+    // threads (priority 1) have queued their last pictures, which then never run. TMB_GS_LAG_AB=1 switches it on
+    // and off every 100 vblanks instead (measurements).
+    void vblankHandlerOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t gp = getRegU32(ctx, 28);
         const auto rd = [&](uint32_t addr) { return *reinterpret_cast<const int32_t *>(rdram + (addr & 0x1FFFFFFu)); };
         const int32_t displaying = rd(gp - 0x340Cu);
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
+        if (g_gsLag)
+        {
+            bool lag = displaying == 0;
+            if (g_gsLagAb)
+                lag = lag && (runtime->eeScheduler().currentVSyncTick() / 100u) % 2u == 0u;
+            runtime->memory().setGsLag(lag);
+        }
+        if (!g_traceMovie)
+            return;
         static uint32_t s_dispCalls = 0;
         if (std::getenv("TMB_TRACE_DISPLAY") && (s_dispCalls++ % 150u) == 0u)
         {
@@ -350,7 +367,14 @@ namespace
         // VIF1 and the VU1 microcode (two thirds of the game thread in the match) run on their own thread
         // (TMB_VIF1_SERIAL=1 keeps them on the game thread). The game waits for them in sceGsSyncPath each frame.
         if (const char *serial = std::getenv("TMB_VIF1_SERIAL"); !(serial && *serial == '1'))
+        {
             runtime.memory().setVif1Threaded(true);
+            // ...and finish a frame while the game runs the next (TMB_GS_LAG=0 keeps them in step).
+            const char *lag = std::getenv("TMB_GS_LAG");
+            g_gsLag = !(lag && *lag == '0');
+            g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
+        }
+        runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);
@@ -382,7 +406,7 @@ namespace
             runtime.registerFunction(kTermAll, &termAllTrace);
             runtime.registerFunction(kPcmCallback, &pcmCallbackTrace);
             runtime.registerFunction(kAudioDecSendToIop, &audioDecSendToIopTrace);
-            runtime.registerFunction(kVblankHandler, &vblankHandlerTrace);
+            g_traceMovie = true;
         }
 
         PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();

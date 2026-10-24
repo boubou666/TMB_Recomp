@@ -291,6 +291,30 @@ Build: the microcode is an object library both `ps2EntryRunner` and `tmb_vu1_rep
 killed by systemd-oomd, hence one function per pair body. After a fork update, regenerate with `scripts/recomp.sh`
 (after `scripts/build_tools.sh`) so the microcode files match the planner.
 
+## The GS a frame behind (2026-10-24)
+With VIF1 and VU1 on their thread, no thread was busy all the time (profiled in the match: VIF1/VU1 worker about
+70%, game thread 60%, GS thread 70%): each frame was still serialized, the game waiting in `sceGsSyncPath` for the
+worker to finish the frame and the worker then waiting for the next one. `sceGsSyncPath` is called three times
+per frame (`hier`, `particleDraw`, `Hud::Update`), and the one in `particleDraw` waited most (about a quarter of
+the time).
+
+The fork's GS lag (`PS2Memory::setGsLag`, on for TMB, `TMB_GS_LAG=0` turns it off) lets the worker finish a frame
+while the game runs the next: `sceGsSyncPath` only waits for the frame before, PATH3 packets and the display
+register writes (`ieGsPutDispEnv` writes DISPFB each frame) join the worker's queue in order instead of draining
+it, and the worker latches the presented frame once it has drawn it. Two traps found on the way:
+- CSR has to stay live. The vblank handler reads it (FIELD) and writes it back; queued, that write put back the old
+  FIELD after the next vblank had flipped it.
+- The movie player froze at the end of a movie. `updateMpegMovieDecoding` waits for the decoder in a loop that
+  calls `switchThread` (`RotateThreadReadyQueue(1)`) at priority 0, so the priority-1 decode threads only run when
+  the main thread blocks. Held back by the GS, it used to block often enough for them to queue their last
+  pictures; running ahead, it reached the loop first and spun forever. The lag is off while a movie plays
+  (`displaying`, gp-0x340C, read by the vblank handler override).
+
+Measured in the match with the lag switched on and off every 100 vblanks (`TMB_GS_LAG_AB=1`): +10%, +6% and +4%
+in three runs. With the lag the only wait left on the game thread is the frame before (about 15% of its time) and
+the worker is about 90% busy, a tenth of it latching the presented frame (the backend flush and the copy of the
+display buffer). The next limits are the worker itself and the GS thread behind it.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
