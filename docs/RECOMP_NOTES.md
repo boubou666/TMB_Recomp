@@ -341,10 +341,16 @@ a relaxed float mode (no PS2 operand truncation or operand normalization, result
 tolerance on the replay's PATH1 packets. Then VU0 through the same recompiler, the IOP on its own thread, and the
 GS raster workers.
 
-Lighting flicker reported in the match (surfaces lighting up with the camera angle): the GS draws what it gets;
-the vertex colours themselves switch between their value and 255 from frame to frame on a still camera, whole
-VU1 batches at a time. Either the light data the game builds per object (`plight*`, `hierLightNode`, VU0 macro
-code) or registers a microprogram reads before setting. To be traced with `PS2X_GS_RECORD` + `PS2X_VU1_RECORD`.
+Lighting flicker reported in the match (surfaces lighting up with the camera angle): the GS drew what it got, the
+vertex colours switched to 255 by whole VU1 batches. Cause: the VU EFU opcodes were off by one in the fork
+(interpreter and recompiler alike, so the bit-exact check could not see it): 0x79 is ERSQRT, run as ESIN. The
+lighting microprogram (pc 0x1AD0) takes 1/distance of lights 1 and 3 with ERSQRT; the sine polynomial on a squared
+distance gave ~FLT_MAX and every vertex in front of a headlight clamped to white. Fixed; saturated vertices with a
+real spotlight in slot 1: 29% -> 0. The replay reference is now `build/vu1_match2.trace` (20000 runs recorded with
+the fix and the recompiler, matching the interpreter); `vu1_match.trace` predates the fix.
+
+The relaxed float mode (`PS2X_VU_AOT_RELAXED=1` when generating; `ps2_vu1_replay --tolerance`) only gains ~12% of
+the replay's cycles: float arithmetic is no longer what recompiled blocks spend their time on.
 
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
