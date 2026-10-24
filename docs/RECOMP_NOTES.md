@@ -254,6 +254,21 @@ costs about 60% of a frame, and runs about 10% slower on the worker than on the 
 Build note: a `GAME_DONE` marker in a log reused between builds can be read before the new build truncates it; wait on
 the build process or unit, not on the log.
 
+## Where VU1's time goes (2026-10-24)
+On the 8000 recorded match runs (`tmb_vu1_replay`): 2.33M instruction pairs, 3.01M VU cycles, about 30 ns per pair
+once the tool's own copies are left out (it copies 48 KB of VU memory per run, 8-11% of a pass).
+- Experiments that drop part of the model (no stalls, no timing, no flags) looked 37-52% faster, but are not
+  measurements: TMB's microprograms run timing-dependent loops, and without stalls the same runs executed 1.07M pairs
+  instead of 2.33M. Compare pair counts before trusting such an experiment.
+- Measured without changing semantics: 56,928 stalls per pass, about 22 ns each (1.3 ms in total); readiness
+  bookkeeping about 10%, flags about 25% (computing them; queueing them only 7%), dispatch from `run` about 6%,
+  the rest spread over exact float handling and execution. `-fno-stack-protector` on the compiled pairs: no change.
+- 82% of blocks (72% of pairs) never stall on a write from before their entry, so stalls could be scheduled when
+  the microcode is compiled, but that only removes the bookkeeping part.
+- Full speed (50 fps) needs about 80M VU1 cycles per second, 2.2 s of work at the current speed: per-pair exact
+  emulation at about 100 host cycles cannot get there. That takes a real VU recompiler (flag liveness, timing
+  computed per block, values kept in host registers), a project of its own.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on the EE thread), sound output, controls in the match, memory card.
