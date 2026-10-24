@@ -358,7 +358,10 @@ emulation (~25%), then the game code (~17%).
 The GS lag never ran in the match until now: it was turned on by the game's vblank handler, which only runs
 while movies play, and the last movie left it off. `hier` (each frame of 3D rendering) now turns it on when no
 movie plays. Measured in the same run (`TMB_GS_LAG_AB=1`, lag really on in its windows): 26.5 fps against 22.2,
-+19%. The earlier +4..10% A/B results were noise.
++19%. The earlier +4..10% A/B results were noise. But the controls then lagged visibly: only the VIF1 queue was
+bounded to a frame, and the GS thread's queue (up to 32 MB of packets) let the picture fall several frames behind.
+Bounded to one presented frame (the sync also waits for the GS to have presented the frame before last), the lag
+gains nothing (25.7 against 26.5 fps): the +19% was that latency. Off by default now (`TMB_GS_LAG=1`).
 
 Frame rate in this game is quantized by the vblank wait: a frame takes 1 vblank (50 fps) or 2 (25 fps). With
 both main threads around 26 ms per frame most frames take 2; every thread has to fit in 20 ms. Whole-run fps

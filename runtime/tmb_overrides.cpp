@@ -384,9 +384,11 @@ namespace
         if (const char *serial = std::getenv("TMB_VIF1_SERIAL"); !(serial && *serial == '1'))
         {
             runtime.memory().setVif1Threaded(true);
-            // ...and finish a frame while the game runs the next (TMB_GS_LAG=0 keeps them in step).
+            // TMB_GS_LAG=1: ...and finish a frame while the game runs the next. Off by default: bounded to one
+            // presented frame (the input latency it adds), it gains nothing measurable; unbounded, its gain was the
+            // GS falling several frames behind the controls.
             const char *lag = std::getenv("TMB_GS_LAG");
-            g_gsLag = !(lag && *lag == '0');
+            g_gsLag = lag && *lag == '1';
             g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
         }
         runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
