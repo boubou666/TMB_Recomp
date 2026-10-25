@@ -2,10 +2,10 @@
 
 # TMB_Recomp
 
-**A native Linux port of *Twisted Metal: Black* (PAL, `SCES-50360`), made by statically recompiling the game's PlayStation 2 code to C++.**<br>
+**A native Linux and Windows port of *Twisted Metal: Black* (PAL, `SCES-50360`), made by statically recompiling the game's PlayStation 2 code to C++.**<br>
 Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on a reimplementation of the PS2 hardware.
 
-![Platform](https://img.shields.io/badge/platform-Linux-1b8cff)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
 ![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-17a35b)
 ![Status](https://img.shields.io/badge/status-not%20playable%20yet-d01f3c)
@@ -81,7 +81,8 @@ the GCC/Clang build flags for the runtime's AVX2 code.
 
 ## Requirements
 
-- Linux (developed on Arch), CMake 3.21+, Ninja, GCC 13+ or Clang with C++20
+- Linux (developed on Arch) or Windows 10/11 with [MSYS2](https://www.msys2.org/) (UCRT64, see below)
+- CMake 3.21+, Ninja, GCC 13+ or Clang with C++20
 - FFmpeg development libraries (`libavcodec`, `libavformat`, `libavutil`, `libswresample`, `libswscale`) and `pkg-config`
 - X11/Wayland and OpenGL development headers (raylib is fetched and built by the fork)
 - `bsdtar` (libarchive) to extract the disc
@@ -99,6 +100,19 @@ scripts/recomp.sh                                                       # ELF + 
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game
 scripts/run.sh                                                          # ps2EntryRunner game/SCES_503.60
 ```
+
+### Windows
+
+The same scripts run in an MSYS2 **UCRT64** shell, with MSYS2's GCC (MSVC is not supported for this port).
+
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,pkgconf,ffmpeg,libarchive,python} git rsync
+git clone --recurse-submodules https://github.com/boubou666/TMB_Recomp.git
+```
+
+Then follow the steps above. `scripts/stage_dlls.sh` copies the DLLs the runner needs next to
+`ps2EntryRunner.exe`, so it can also be started outside the MSYS2 shell. The GPU renderer needs a Vulkan driver
+(any recent NVIDIA, AMD or Intel driver ships one).
 
 `scripts/analyze.sh` regenerates the TOML from scratch; it discards manual edits, so diff before committing.
 The runner build compiles about 70 MB of generated C++ and takes a while the first time.

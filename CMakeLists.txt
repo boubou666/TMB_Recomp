@@ -31,6 +31,9 @@ list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\\.cpp$"
 set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
 
 file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
+# The host OS layer includes <windows.h>, which clashes with raylib names: outside the unity batches and the PCH.
+set_source_files_properties("${CMAKE_SOURCE_DIR}/runtime/tmb_host.cpp" PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
 
 # VU1 microcode compiled ahead of time by ps2_vu_aot (scripts/recomp.sh): an object library both executables
 # link, so it compiles once. -O3 unrolls the operand loops over each pair's constexpr decode; debug info is of no

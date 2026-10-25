@@ -19,7 +19,12 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
 4. The game data is not in the repository (never commit it). Put your own ISO of SCES-50360 at the repo root,
    then follow "Build and run" in the README: `extract_iso.sh`, `build_tools.sh`, `recomp.sh`,
    `build_runtime.sh`.
-5. The first build compiles about 3500 generated files. Later, a change to `ps2_runtime.h`, `ps2_memory.h` or
+5. On Windows: MSYS2 UCRT64 with its GCC, as in the README's Windows section. Same scripts; run
+   `scripts/stage_dlls.sh` after a build to start the runner outside the MSYS2 shell. The perf tooling differs:
+   `TMB_TRACE_FRAMES` and `TMB_TRACE_TIMELINE` read thread CPU times through `runtime/tmb_host.cpp`
+   (QueryThreadCycleTime there), and there is no `perf`; use the fork's sampling profiler
+   (`PS2X_PROFILE=<seconds>`) or a Windows profiler.
+6. The first build compiles about 3500 generated files. Later, a change to `ps2_runtime.h`, `ps2_memory.h` or
    `gs_frontend.h` rebuilds all of them (a few minutes with the unity build).
 
 ## Current state

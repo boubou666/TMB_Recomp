@@ -439,7 +439,28 @@ spent waiting for VIF1/GS, and the CPU time per frame of each host thread (the f
   (dropping them is the likely reason the transfer never ended). Not seen in the runs since; if it comes back,
   `[iop:call] ... still running` lines show where the server waits, with the SPU2's last DMA events.
 
+## Windows port, movie skip hang (2026-10-25)
+- Native Windows build with MSYS2 UCRT64 GCC 16 (same compiler family and flags as Linux, FFmpeg from pacman).
+  Changes: the fork's FFmpeg prebuilt-zip path is for MSVC only (MinGW uses pkg-config); `-march=x86-64-v3` was
+  skipped because CMake left `CMAKE_SYSTEM_PROCESSOR` empty (`PROCESSOR_ARCHITECTURE` missing from the MSYS2
+  login shell's environment), the fork now asks the compiler (`-dumpmachine`); winmm's `PlaySound` took raylib's
+  calls at link time (winmm ahead of raylib); TMB's `/proc` and `clock_gettime` thread CPU sampling moved to
+  `runtime/tmb_host.cpp` (Toolhelp32, `GetThreadDescription`, `QueryThreadCycleTime` on Windows).
+- With the same pad script the game hung on the copyright screen on Windows: Cross at 60 s fell inside the
+  copyright movie there, skipping it. After `videoDecAbort` (state 1), `updateMpegMovieDecoding` loops on
+  `switchThread` until the decode thread acknowledges (state 3). `switchThread` is `RotateThreadReadyQueue(1)`,
+  written for ezmpeg's main loop at priority 1; TMB's main thread is at priority 0, so the priority-1 decode
+  threads never ran. Most likely not Windows-specific (not checked on Linux): there the skip landed elsewhere. `runtime/tmb_overrides.cpp` now
+  drops a priority-0 caller to priority 1 for the rotation and restores it when it is scheduled again (through
+  the padding word 0x1e06cc after `readMpeg`, like `kSubstepReturn`).
+- First Windows numbers (Ryzen 7 7800X3D, RTX 5070 Ti), CPU rasterizer, in the match: 55-90 ms per frame against
+  ~42 ms on the Linux machine. Not investigated yet; MinGW's winpthreads mutexes and condition variables, used
+  by every host thread hand-off, are a first suspect. The GPU renderer works on Windows too (70-85 ms per frame
+  there), but unnamed threads (driver or Granite workers) then use 300-370 ms of CPU per frame, against ~4 ms
+  with the CPU rasterizer: something spins.
+
 ## Open
+- Windows: the match runs about half as fast as on Linux.
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the

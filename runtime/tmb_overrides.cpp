@@ -7,6 +7,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
+#include "tmb_host.h"
 #include <string>
 #include <thread>
 #include <atomic>
@@ -25,7 +26,6 @@
 #include <map>
 #include <sstream>
 #include <unordered_map>
-#include <unistd.h>
 #include <iostream>
 
 namespace ps2_stubs
@@ -89,6 +89,54 @@ namespace
         const uint32_t videoDec = getRegU32(ctx, 4);
         videoDecAbort__FP8VideoDec_0x1ff920(rdram, ctx, runtime);
         ps2_stubs::abortMpegPlayback(runtime, videoDec);
+    }
+
+    // The movie player's switchThread is RotateThreadReadyQueue(1): Sony's ezmpeg sample runs its main loop at
+    // priority 1, so the call lets the decode threads (priority 1) run. TMB's main thread is at priority 0, where
+    // the rotation does nothing. The player's waits mostly block on something else, but after a skip
+    // (videoDecAbort) updateMpegMovieDecoding loops on switchThread alone until the decode thread acknowledges
+    // the abort, which it never gets to do: the game hung on a skipped copyright movie. A priority-0 caller drops
+    // to priority 1 for the rotation, so the priority-1 threads run once, and gets its priority back when it is
+    // scheduled again, through kSwitchThreadReturn (padding after readMpeg, never executed).
+    constexpr uint32_t kSwitchThread = 0x001E06D0u;
+    constexpr uint32_t kSwitchThreadReturn = 0x001E06CCu;
+    constexpr int kMoviePriority = 1;
+    std::unordered_map<int, std::pair<int, uint32_t>> g_switchThreadSaved; // thread -> (priority, return address)
+
+    void switchThreadOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &ee = runtime->eeScheduler();
+        const GuestThread *self = ee.currentThread();
+        if (!self || self->currentPriority >= kMoviePriority)
+        {
+            switchThread__Fv_0x1e06d0(rdram, ctx, runtime);
+            return;
+        }
+        const int id = ee.currentThreadId();
+        int oldPriority = 0;
+        if (ee.changePriority(id, kMoviePriority, false, oldPriority) != 0) // KE_OK
+        {
+            switchThread__Fv_0x1e06d0(rdram, ctx, runtime);
+            return;
+        }
+        g_switchThreadSaved[id] = {oldPriority, getRegU32(ctx, 31)};
+        ctx->pc = kSwitchThreadReturn;
+        SET_GPR_U32(ctx, 2, static_cast<uint32_t>(ee.rotateReadyQueue(kMoviePriority, false)));
+        ee.transferIfRequested(false);
+    }
+
+    void switchThreadReturn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &ee = runtime->eeScheduler();
+        const auto saved = g_switchThreadSaved.find(ee.currentThreadId());
+        if (saved == g_switchThreadSaved.end())
+            return;
+        const auto [priority, ret] = saved->second;
+        g_switchThreadSaved.erase(saved);
+        ctx->pc = ret;
+        int oldPriority = 0;
+        ee.changePriority(0, priority, false, oldPriority);
+        ee.transferIfRequested(false);
     }
 
     // TMB_TRACE_MOVIE=1: log the movie player's thread teardown (temporary bring-up aid).
@@ -346,35 +394,17 @@ namespace
     // next TheGame::Update (W: vsync wait, rendering kick, pad) and from there to the end of the processing (B).
     std::chrono::steady_clock::time_point g_frameEnd, g_frameUpdate;
 
-    // CPU time of each host thread (utime + stime from /proc) per frame since the previous call, by thread name.
+    // CPU time of each host thread per frame since the previous call, by thread name.
     std::string threadCpuPerFrame(uint32_t frames)
     {
-        static std::unordered_map<std::string, uint64_t> s_previous;
+        static std::unordered_map<uint64_t, int64_t> s_previous;
         std::map<std::string, double> perName;
-        std::error_code ec;
-        for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec))
+        for (const tmb::host::ThreadCpu &thread : tmb::host::threadCpuTimes())
         {
-            std::ifstream stat(task.path() / "stat");
-            std::string line;
-            std::getline(stat, line);
-            const size_t open = line.find('('), close = line.rfind(')');
-            if (open == std::string::npos || close == std::string::npos)
-                continue;
-            const std::string name = line.substr(open + 1, close - open - 1);
-            std::istringstream rest(line.substr(close + 2));
-            std::string field;
-            uint64_t utime = 0, stime = 0;
-            for (int i = 3; i <= 15 && rest >> field; ++i)
-            {
-                if (i == 14) utime = std::stoull(field);
-                if (i == 15) stime = std::stoull(field);
-            }
-            const std::string key = task.path().filename().string();
-            const uint64_t ticks = utime + stime;
-            const auto previous = s_previous.find(key);
+            const auto previous = s_previous.find(thread.id);
             if (previous != s_previous.end())
-                perName[name] += static_cast<double>(ticks - previous->second) * 1000.0 / static_cast<double>(sysconf(_SC_CLK_TCK)) / frames;
-            s_previous[key] = ticks;
+                perName[thread.name.empty() ? "?" : thread.name] += static_cast<double>(thread.cpuNs - previous->second) / 1e6 / frames;
+            s_previous[thread.id] = thread.cpuNs;
         }
         std::string out;
         char buffer[64];
@@ -549,20 +579,11 @@ namespace
 
     void timelineStart()
     {
-        // The threads' CPU clocks (Linux: a thread id makes a clock id).
-        clockid_t clocks[3] = {-1, -1, -1};
+        // The threads' CPU clocks.
+        int64_t clocks[3];
         const char *names[3] = {"GameThread", "vif1", "gs"};
-        std::error_code ec;
-        for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec))
-        {
-            std::ifstream comm(task.path() / "comm");
-            std::string name;
-            std::getline(comm, name);
-            const pid_t tid = static_cast<pid_t>(std::stol(task.path().filename().string()));
-            for (int i = 0; i < 3; ++i)
-                if (name == names[i] && clocks[i] == -1)
-                    clocks[i] = static_cast<clockid_t>((~static_cast<clockid_t>(tid) << 3) | 6);
-        }
+        for (int i = 0; i < 3; ++i)
+            clocks[i] = tmb::host::findThreadCpuClock(names[i]);
         g_timeline.startNs = timelineNow();
         g_timeline.state.store(1);
         g_timeline.sampler = std::thread([clocks]()
@@ -571,11 +592,7 @@ namespace
             {
                 Timeline::Sample sample{timelineNow(), {0, 0, 0}};
                 for (int i = 0; i < 3; ++i)
-                {
-                    timespec ts{};
-                    if (clocks[i] != -1 && clock_gettime(clocks[i], &ts) == 0)
-                        sample.cpu[i] = ts.tv_sec * 1000000000ll + ts.tv_nsec;
-                }
+                    sample.cpu[i] = tmb::host::readThreadCpuNs(clocks[i]);
                 {
                     std::lock_guard<std::mutex> lock(g_timeline.mutex);
                     g_timeline.samples.push_back(sample);
@@ -693,7 +710,7 @@ namespace
         // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {
-            setenv("PS2X_GS_RASTER_THREADS", "4", 0);
+            tmb::host::setEnvDefault("PS2X_GS_RASTER_THREADS", "4");
             GSCpuBackend::SetAsyncRasterization(true);
         }
         // VIF1 and the VU1 microcode (two thirds of the game thread in the match) run on their own thread
@@ -745,6 +762,8 @@ namespace
             startThreadTrace(runtime, std::max(0.5, std::atof(period)));
         }
         runtime.registerFunction(kVideoDecAbort, &videoDecAbortOverride);
+        runtime.registerFunction(kSwitchThread, &switchThreadOverride);
+        runtime.registerFunction(kSwitchThreadReturn, &switchThreadReturn);
         if (const char *trace = std::getenv("TMB_TRACE_FONT"); trace && *trace == '1')
         {
             runtime.registerFunction(kFontDmaFontData, &fontDmaFontDataTrace);

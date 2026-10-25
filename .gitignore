@@ -35,3 +35,6 @@ generated/
 
 # Runtime logs
 ps2_log.txt
+
+# Debug UI layout the runtime writes in the working directory
+imgui.ini
