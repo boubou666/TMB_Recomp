@@ -420,6 +420,25 @@ spent waiting for VIF1/GS, and the CPU time per frame of each host thread (the f
 - The biggest consumer is software rasterization (4 x ~23 ms of CPU per frame). The fork's `GSRasterBackend`
   interface would take a GPU renderer.
 
+## GPU renderer, frame timeline, sound hang (2026-10-25)
+- paraLLEl-GS (fork, `PS2X_GS_RENDERER=parallel`) draws on the GPU: the four raster threads (~100 ms of CPU a
+  frame) go. Menus, loading screen and match look as with the CPU rasterizer once SMODE1/SMODE2 are set (TMB's
+  `sceGsResetGraph` never set them, scan-out came out 256 lines) and the PCRTC merge takes circuit 1's alpha
+  0x80 as 1.0 (the driver portrait on the level loading screen was half transparent).
+- `TMB_TRACE_TIMELINE` + `tools/timeline.py`: each frame the game thread waits for the vblank (~14 ms), then
+  game, vif1 and gs run together for ~19-25 ms. Under 20 ms the frame is one vblank, over it two; at two the
+  update runs twice (substeps), which makes the next one long too. Frame times are bimodal (20 / 40 ms).
+  Which thread is over depends on the scene: the game thread (IOP + SPU2 a third of it) in light ones, VU1
+  (up to 32 ms of microcode a frame) in busy ones; whole-run averages hide it, compare like scenes.
+- 989snd's voice search was two fifths of the IOP's instructions: native now (fork), the IOP's share of the game
+  thread went from 22% to 17%.
+- The hang in `snd_SendIOPCommandNoWait` (about one run in four, while a level loads): 989snd's command server,
+  run inline from `sceSifCallRpc`, used up its 2M-instruction budget polling for a sound RAM transfer and was
+  abandoned, its reply (0xFFFFFFFF markers `snd_GotReturns` waits for) never written. The fork now lets the
+  other IOP threads run and carries on, and keeps interrupts that come while disabled pending until EnableIntr
+  (dropping them is the likely reason the transfer never ended). Not seen in the runs since; if it comes back,
+  `[iop:call] ... still running` lines show where the server waits, with the SPU2's last DMA events.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.

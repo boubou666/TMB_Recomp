@@ -132,6 +132,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `TMB_MAX_FRAME_MS=<ms>` | Longest frame weapons and debris move over (default 40; slow motion below 25 fps) |
 | `TMB_SUBSTEPS=<n>` | Run the game update once per vblank field, up to n times a frame, so cars do not go through the ground below 50 fps (default 4, 1 disables) |
 | `TMB_TRACE_FRAMES=1` | Every 100 frames: frame time split, EE idle and VIF1/GS waits, CPU ms per frame of each host thread |
+| `TMB_TRACE_TIMELINE=<file>` | 4 s of the match as a timeline (game events, game/vif1/gs thread CPU every 0.2 ms) for `tools/timeline.py` |
 | `PS2X_IOP_THREAD=1` | Run the IOP on its own thread (experimental, slower in TMB today) |
 | `PS2X_GS_RENDERER=parallel` | Draw on the GPU with paraLLEl-GS (Vulkan; experimental, no speed gain yet) |
 | `TMB_TRACE_POS=<file>` | Every vehicle's position at each collision pass (`scripts/bots.sh` and `tools/falls.py` count the falls) |

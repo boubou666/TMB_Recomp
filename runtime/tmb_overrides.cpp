@@ -10,6 +10,8 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <ctime>
+#include <mutex>
 #include <chrono>
 #include <algorithm>
 
@@ -34,6 +36,8 @@ namespace ps2_stubs
 namespace
 {
     constexpr uint32_t kTmbPalEntry = 0x00100008u;
+
+    void timelineEvent(char type, uint32_t arg = 0); // TMB_TRACE_TIMELINE
 
     // The game reads raw sectors with sceCdRead (LBN 0x10, the primary volume descriptor,
     // right after boot), which the file-backed cdrom0: cannot serve. Give the CD device the
@@ -169,7 +173,9 @@ namespace
     {
         updateGsLag(rdram, runtime);
         const auto start = std::chrono::steady_clock::now();
+        timelineEvent('H');
         hier__Fi_0x1d40b0(rdram, ctx, runtime);
+        timelineEvent('h');
         if (g_traceFrames)
             g_hierMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
@@ -179,6 +185,7 @@ namespace
         const uint32_t gp = getRegU32(ctx, 28);
         const auto rd = [&](uint32_t addr) { return *reinterpret_cast<const int32_t *>(rdram + (addr & 0x1FFFFFFu)); };
         const int32_t displaying = rd(gp - 0x340Cu);
+        timelineEvent('B');
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
         updateGsLag(rdram, runtime);
         if (!g_traceMovie)
@@ -415,6 +422,7 @@ namespace
     void timerEndOfRealTimeProcessingOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_runtime = runtime;
+        timelineEvent('E');
         if (g_traceFrames)
             traceFrameEnd();
         const uint32_t gp = getRegU32(ctx, 28);
@@ -484,9 +492,130 @@ namespace
         ctx->pc = s.ret;
     }
 
+    // TMB_TRACE_TIMELINE=<file>: 4 s of the match (from its 500th TheGame::Update) as a timeline, for
+    // tools/timeline.py: the game's events (vblank handler, Update, hier, sceGsSyncPath / sceGsSyncV enter and exit,
+    // end of the real-time processing) and, every 0.2 ms, the CPU time of the game, vif1 and gs threads.
+    struct Timeline
+    {
+        struct Event
+        {
+            int64_t ns;
+            char type;
+            uint32_t arg;
+        };
+        struct Sample
+        {
+            int64_t ns;
+            int64_t cpu[3];
+        };
+        std::string path;
+        std::atomic<int> state{0}; // 0 waiting, 1 recording, 2 done
+        uint32_t updates = 0;
+        int64_t startNs = 0;
+        std::mutex mutex;
+        std::vector<Event> events;
+        std::vector<Sample> samples;
+        std::thread sampler;
+    } g_timeline;
+
+    int64_t timelineNow()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void timelineEvent(char type, uint32_t arg)
+    {
+        if (g_timeline.state.load(std::memory_order_relaxed) != 1)
+            return;
+        std::lock_guard<std::mutex> lock(g_timeline.mutex);
+        g_timeline.events.push_back({timelineNow(), type, arg});
+    }
+
+    void timelineDump()
+    {
+        FILE *out = std::fopen(g_timeline.path.c_str(), "w");
+        if (!out)
+            return;
+        std::lock_guard<std::mutex> lock(g_timeline.mutex);
+        for (const auto &e : g_timeline.events)
+            std::fprintf(out, "e %lld %c %x\n", static_cast<long long>(e.ns - g_timeline.startNs), e.type, e.arg);
+        for (const auto &s : g_timeline.samples)
+            std::fprintf(out, "s %lld %lld %lld %lld\n", static_cast<long long>(s.ns - g_timeline.startNs),
+                         static_cast<long long>(s.cpu[0]), static_cast<long long>(s.cpu[1]), static_cast<long long>(s.cpu[2]));
+        std::fclose(out);
+        std::fprintf(stderr, "[tmb:timeline] %zu events, %zu samples written to %s\n", g_timeline.events.size(),
+                     g_timeline.samples.size(), g_timeline.path.c_str());
+    }
+
+    void timelineStart()
+    {
+        // The threads' CPU clocks (Linux: a thread id makes a clock id).
+        clockid_t clocks[3] = {-1, -1, -1};
+        const char *names[3] = {"GameThread", "vif1", "gs"};
+        std::error_code ec;
+        for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec))
+        {
+            std::ifstream comm(task.path() / "comm");
+            std::string name;
+            std::getline(comm, name);
+            const pid_t tid = static_cast<pid_t>(std::stol(task.path().filename().string()));
+            for (int i = 0; i < 3; ++i)
+                if (name == names[i] && clocks[i] == -1)
+                    clocks[i] = static_cast<clockid_t>((~static_cast<clockid_t>(tid) << 3) | 6);
+        }
+        g_timeline.startNs = timelineNow();
+        g_timeline.state.store(1);
+        g_timeline.sampler = std::thread([clocks]()
+                                         {
+            while (g_timeline.state.load() == 1)
+            {
+                Timeline::Sample sample{timelineNow(), {0, 0, 0}};
+                for (int i = 0; i < 3; ++i)
+                {
+                    timespec ts{};
+                    if (clocks[i] != -1 && clock_gettime(clocks[i], &ts) == 0)
+                        sample.cpu[i] = ts.tv_sec * 1000000000ll + ts.tv_nsec;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(g_timeline.mutex);
+                    g_timeline.samples.push_back(sample);
+                }
+                if (sample.ns - g_timeline.startNs > 4000000000ll)
+                {
+                    g_timeline.state.store(2);
+                    timelineDump();
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            } });
+        g_timeline.sampler.detach();
+    }
+
+    void sceGsSyncPathTimeline(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t ra = getRegU32(ctx, 31);
+        timelineEvent('P', ra);
+        sceGsSyncPath_0x204e28(rdram, ctx, runtime);
+        timelineEvent('p', ra);
+    }
+
+    void sceGsSyncVTimeline(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t ra = getRegU32(ctx, 31);
+        timelineEvent('V', ra);
+        sceGsSyncV_0x204d90(rdram, ctx, runtime);
+        timelineEvent('v', ra);
+    }
+
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         Substeps &s = g_substeps;
+        if (!g_timeline.path.empty() && s.steps == 0)
+        {
+            if (g_timeline.state.load() == 0 && ++g_timeline.updates == 500u)
+                timelineStart();
+            timelineEvent('U', static_cast<uint32_t>(*gpGlobal(rdram, kFieldsLastFrameGpOffset)));
+        }
         if (g_traceFrames && s.steps == 0)
             g_frameUpdate = std::chrono::steady_clock::now();
         s.gp = getRegU32(ctx, 28);
@@ -597,6 +726,12 @@ namespace
         if (const char *substeps = std::getenv("TMB_SUBSTEPS"); substeps && *substeps)
             g_maxSubsteps = std::max(1, std::atoi(substeps));
         runtime.registerFunction(kTheGameUpdate, &theGameUpdateOverride);
+        if (const char *timeline = std::getenv("TMB_TRACE_TIMELINE"); timeline && *timeline)
+        {
+            g_timeline.path = timeline;
+            runtime.registerFunction(0x00204E28u, &sceGsSyncPathTimeline);
+            runtime.registerFunction(0x00204D90u, &sceGsSyncVTimeline);
+        }
         runtime.registerFunction(kSubstepReturn, &substepReturn);
         if (const char *path = std::getenv("TMB_TRACE_BLACKBOX"); path && *path)
             g_blackboxPath = path;
