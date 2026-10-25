@@ -19,6 +19,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <unordered_map>
+#include <unistd.h>
 #include <iostream>
 
 namespace ps2_stubs
@@ -157,10 +162,16 @@ namespace
         runtime->memory().setGsLag(lag);
     }
 
+    double g_hierMs = 0, g_updateMs = 0;
+    bool g_traceFrames = false;
+
     void hierOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         updateGsLag(rdram, runtime);
+        const auto start = std::chrono::steady_clock::now();
         hier__Fi_0x1d40b0(rdram, ctx, runtime);
+        if (g_traceFrames)
+            g_hierMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
 
     void vblankHandlerOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -324,8 +335,88 @@ namespace
     constexpr int32_t kFrameTicksGpOffset = -0x2BDC; // timerGetFrameTime's tick count (gp-relative)
     int32_t g_maxFrameTicks = 40 * 576;
 
+    // TMB_TRACE_FRAMES=1: every 100 frames, the host time from the end of one frame's real-time processing to the
+    // next TheGame::Update (W: vsync wait, rendering kick, pad) and from there to the end of the processing (B).
+    std::chrono::steady_clock::time_point g_frameEnd, g_frameUpdate;
+
+    // CPU time of each host thread (utime + stime from /proc) per frame since the previous call, by thread name.
+    std::string threadCpuPerFrame(uint32_t frames)
+    {
+        static std::unordered_map<std::string, uint64_t> s_previous;
+        std::map<std::string, double> perName;
+        std::error_code ec;
+        for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec))
+        {
+            std::ifstream stat(task.path() / "stat");
+            std::string line;
+            std::getline(stat, line);
+            const size_t open = line.find('('), close = line.rfind(')');
+            if (open == std::string::npos || close == std::string::npos)
+                continue;
+            const std::string name = line.substr(open + 1, close - open - 1);
+            std::istringstream rest(line.substr(close + 2));
+            std::string field;
+            uint64_t utime = 0, stime = 0;
+            for (int i = 3; i <= 15 && rest >> field; ++i)
+            {
+                if (i == 14) utime = std::stoull(field);
+                if (i == 15) stime = std::stoull(field);
+            }
+            const std::string key = task.path().filename().string();
+            const uint64_t ticks = utime + stime;
+            const auto previous = s_previous.find(key);
+            if (previous != s_previous.end())
+                perName[name] += static_cast<double>(ticks - previous->second) * 1000.0 / static_cast<double>(sysconf(_SC_CLK_TCK)) / frames;
+            s_previous[key] = ticks;
+        }
+        std::string out;
+        char buffer[64];
+        for (const auto &[name, ms] : perName)
+            if (ms >= 0.5)
+            {
+                std::snprintf(buffer, sizeof(buffer), " %s %.1f", name.c_str(), ms);
+                out += buffer;
+            }
+        return out;
+    }
+
+    PS2Runtime *g_runtime = nullptr;
+
+    void traceFrameEnd()
+    {
+        static double sumW = 0, sumB = 0, maxW = 0, maxB = 0, sumH = 0, sumU = 0;
+        static uint32_t frames = 0;
+        const auto now = std::chrono::steady_clock::now();
+        if (g_frameEnd.time_since_epoch().count() != 0 && g_frameUpdate > g_frameEnd)
+        {
+            const double w = std::chrono::duration<double, std::milli>(g_frameUpdate - g_frameEnd).count();
+            const double b = std::chrono::duration<double, std::milli>(now - g_frameUpdate).count();
+            sumW += w; sumB += b; maxW = std::max(maxW, w); maxB = std::max(maxB, b);
+            sumH += g_hierMs; sumU += g_updateMs;
+            if (++frames == 100u)
+            {
+                static uint64_t s_idle = 0, s_vif1 = 0;
+                const uint64_t idle = g_runtime->eeScheduler().idleWaitNanoseconds();
+                const uint64_t vif1 = g_runtime->memory().vif1WaitNanoseconds();
+                std::fprintf(stderr, "[tmb:frames] W avg %.1f max %.1f ms, B avg %.1f max %.1f ms, hier %.1f, update %.1f, "
+                             "EE idle %.1f, waiting VIF1/GS %.1f | cpu ms/frame:%s\n",
+                             sumW / frames, maxW, sumB / frames, maxB, sumH / frames, sumU / frames,
+                             (idle - s_idle) / 1e6 / frames, (vif1 - s_vif1) / 1e6 / frames, threadCpuPerFrame(frames).c_str());
+                s_idle = idle;
+                s_vif1 = vif1;
+                sumW = sumB = maxW = maxB = sumH = sumU = 0;
+                frames = 0;
+            }
+        }
+        g_frameEnd = now;
+        g_hierMs = g_updateMs = 0;
+    }
+
     void timerEndOfRealTimeProcessingOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        g_runtime = runtime;
+        if (g_traceFrames)
+            traceFrameEnd();
         const uint32_t gp = getRegU32(ctx, 28);
         timerEndOfRealTimeProcessing__Fv_0x1f7a00(rdram, ctx, runtime);
         int32_t *frameTicks = reinterpret_cast<int32_t *>(rdram + ((gp + kFrameTicksGpOffset) & 0x1FFFFFFu));
@@ -387,6 +478,8 @@ namespace
         *gpGlobal(rdram, kUpdateRateGpOffset) = s.totalRate;
         *gpGlobal(rdram, kFrameTicksGpOffset) = s.totalTicks;
         s.steps = 0;
+        if (g_traceFrames)
+            g_updateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_frameUpdate).count();
         SET_GPR_U32(ctx, 31, s.ret);
         ctx->pc = s.ret;
     }
@@ -394,6 +487,8 @@ namespace
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         Substeps &s = g_substeps;
+        if (g_traceFrames && s.steps == 0)
+            g_frameUpdate = std::chrono::steady_clock::now();
         s.gp = getRegU32(ctx, 28);
         const int32_t fields = *gpGlobal(rdram, kFieldsLastFrameGpOffset);
         const int32_t steps = std::min(fields, g_maxSubsteps);
@@ -498,6 +593,7 @@ namespace
         if (const char *maxMs = std::getenv("TMB_MAX_FRAME_MS"); maxMs && *maxMs)
             g_maxFrameTicks = std::max(1, std::atoi(maxMs)) * 576;
         runtime.registerFunction(kTimerEndOfRealTimeProcessing, &timerEndOfRealTimeProcessingOverride);
+        g_traceFrames = std::getenv("TMB_TRACE_FRAMES") != nullptr;
         if (const char *substeps = std::getenv("TMB_SUBSTEPS"); substeps && *substeps)
             g_maxSubsteps = std::max(1, std::atoi(substeps));
         runtime.registerFunction(kTheGameUpdate, &theGameUpdateOverride);

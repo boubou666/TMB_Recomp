@@ -403,6 +403,23 @@ with the player idle and `tools/falls.py` counts the vehicles going under z -100
   wrote vf10 three times into low EE RAM and bumped vi11/vi12; VDIV by zero gave 0 instead of +-max
   (`bspInterp`).
 
+## Where the frame goes, IOP thread (2026-10-25)
+`TMB_TRACE_FRAMES=1` prints, every 100 frames, the host time from the end of the game's real-time processing to
+the next TheGame::Update (W) and from there to the end (B), the EE idle time (every guest thread blocked), the time
+spent waiting for VIF1/GS, and the CPU time per frame of each host thread (the fork now names them).
+- In the match a frame is two vblanks (40 ms, ~24 fps). Per frame, on this laptop and depending on how hot it
+  is: game thread 16-28 ms of CPU (Update with its two substeps ~11 ms, IOP + SPU2 ~8 ms in lockstep, VU0 ~2 ms),
+  vif1 17-25, gs 20-28 (half of it spinning for the next packet), each of the four gsraster threads 22-30.
+  Every thread is over the 20 ms of one vblank, and together they ask for ~150 ms of CPU per frame: 50 fps
+  needs that roughly halved, not one thread fixed.
+- IOP on its own thread (fork, `PS2X_IOP_THREAD=1`): the SPU2 mixing leaves the game thread, but 989snd answers
+  about 20 RPC queries a frame (function 74, NOWAIT, 12-byte reply) that the game spins on
+  (`snd_SendIOPCommandNoWait`), so their IOP code still runs on the game thread, and the hand-offs made frames
+  slower (45-55 ms). Off by default.
+- Run-to-run noise (thermal) is 40-47 ms per frame for the same build; whole-run comparisons cannot see 10%.
+- The biggest consumer is software rasterization (4 x ~23 ms of CPU per frame). The fork's `GSRasterBackend`
+  interface would take a GPU renderer.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
