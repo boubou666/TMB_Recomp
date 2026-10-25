@@ -461,6 +461,30 @@ spent waiting for VIF1/GS, and the CPU time per frame of each host thread (the f
   compiling paraLLEl-GS's pipelines once; neither was confirmed. Frames are now W ~10 ms (vblank wait) + B
   ~10-14 ms, so most take one or two vblanks around the 20 ms line.
 
+## sc3-port backports (2026-10-25)
+Arzaroth's `sc3/bringup` (Soulcalibur III, same fork) had 153 commits on top of our `fb81320`. 124 of them are now
+on the fork's main, picked in order (`-x` keeps their hashes). Left out:
+- Their VU1 rework (`f1fcfd3` drops our per-fragment `ps2_vu_aot` for their interpreter, then whole-image AOT on
+  16 KiB code memories dumped at run time). TMB uploads its 16 microcode fragments in varying combinations, so
+  whole images do not suit it; our AOT stays.
+- Their pad script parser (we have one), the cores-2 raster default (TMB sets 4) and an SSE4.2 CMake flag.
+
+What came in: recompiler correctness (64-bit signed branches, MOVZ/MOVN, aligned LQ/SQ, VF00, VCALLMSR, BC2F/T,
+MMI lanes and 128-bit HI/LO, wrapping adds, VCLIP, no function in a delay slot, VU0 macro DIV/SQRT/RSQRT and
+random ops), kernel (thread ids from Suspend/Resume/Wakeup, ReferThreadStatus, INTC_STAT write-one-to-clear,
+every timer event delivered, due deadlines held while an interrupt is pending), DMA (chains to their end tag,
+SIGNAL stalls, scratchpad interleave), VIF unpack layouts, the GS (ordered CPU events with a drawing-time
+latency, CSR write-one-to-clear, 32-bit packed Z, ZTE, region wrap rows, texture span), FPU ADD.S/SUB.S guard
+bit, va_list slots, a CD seek/CAV model, SPU2 MADR/BCR, IOP: no interrupt or preemption while a thread has
+interrupts suspended (applied to our `runOthersSlice` too), opt-in wall-clock catch-up once per field
+(`PS2X_EE_CATCHUP=field`) and their diagnostics (`PS2X_STATE_DUMP`, `PS2X_IOP_TRACE_PC`, ...).
+- 546 fork tests pass on Windows. 1026 generated files changed. TMB reaches the match, 0 falls in 8331 vblanks
+  of the bots match. Frame time: 29.9 and 30.5 ms per frame in two runs, against 25.6 and 27.0 before, so
+  probably ~10% slower. Not investigated; first suspects are the GS events now posted with a drawing-time
+  latency and every EE timer event being delivered.
+- `PS2X_EE_CATCHUP=field` on TMB: the pad script, timed in host seconds, then lands on other screens and the run
+  did not reach the match in 240 s. Not looked into; TMB keeps the full catch-up.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
