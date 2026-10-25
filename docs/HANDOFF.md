@@ -71,7 +71,10 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
 
 ## Next steps
 
-1. **Game thread: speed up the IOP interpreter.** `ps2xIOP/src/emulator/iop_emulator.cpp` runs `step()` on
+1. **~~Game thread: speed up the IOP interpreter.~~** Tried on 2026-10-26 and dropped: in the match the IOP is
+   idle ~93% of its clock (~55k instructions a frame), so there is about 0.5 ms to win, and the block version
+   made the EE wait longer for 989snd (RECOMP_NOTES, "IOP block interpreter"). The original plan, kept for
+   reference: `ps2xIOP/src/emulator/iop_emulator.cpp` runs `step()` on
    every instruction. Each step checks import stubs (`imports.decode` reads memory), interrupts, DMA scheduling,
    SPU2 events and pending callbacks. Pre-decoded basic blocks, with those checks only at block boundaries and
    invalidation on writes to code, could cut the IOP's cost by 2 to 3 times. Then look at SPU2 mixing (10% of

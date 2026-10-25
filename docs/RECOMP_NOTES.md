@@ -489,6 +489,20 @@ interrupts suspended (applied to our `runOthersSlice` too), opt-in wall-clock ca
 - `PS2X_EE_CATCHUP=field` on TMB: the pad script, timed in host seconds, then lands on other screens and the run
   did not reach the match in 240 s. Not looked into; TMB keeps the full catch-up.
 
+## IOP block interpreter: tried, dropped (2026-10-26)
+The handoff's plan was pre-decoded IOP blocks (interrupt, import and DMA checks at block edges instead of every
+instruction). Built and tested (all IOP suites, both modes, plus a self-modifying code test), then measured:
+- In the match the IOP is idle about 93% of its clock: 2.4-3.2M instructions per emulated second, 34M of the
+  36.8M cycles skipped by the scheduler as idle. That is ~55k instructions a frame, about half a millisecond of
+  host time: the most a faster interpreter could save.
+- With blocks the game thread took ~3 ms more per frame in three A/B pairs (24.6-27.0 against 29.1-31.9 ms
+  per frame). Its profile showed the EE spinning in `snd_FlushSoundCommands` / `snd_SendIOPCommandNoWait`
+  waiting for 989snd: the coarser IOP event timing made the replies come later in emulated time.
+Reverted. The IOP is not where the frame goes any more (it was before the IOP time skip and the native voice
+search). In the same profile (blocks off) the game thread spends ~29% of its time waiting for the vblank and
+~23% spinning on an atomic load (waiting for VIF1/GS), with the IOP, SPU2 and the game's own code small: the
+frame is bound by the VIF1/VU1 and GS threads, which is where the next speed work goes.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
