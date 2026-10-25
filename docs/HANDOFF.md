@@ -65,6 +65,9 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
 - **Host profile.** `perf record -g -p <pid>` works for user space (`perf_event_paranoid=2`).
 - **Noise.** Whole runs vary from 40 to 47 ms per frame for the same build, because of heat and of what is on
   screen. Compare similar scenes in the timeline, not whole-run averages.
+- **Windows: discard the first runs after a build.** Right after a build, the first runs measured twice as slow
+  (53 against 27 ms per frame, same command), probably Defender and the indexer scanning the new files. The first
+  `PS2X_GS_RENDERER=parallel` run also pays for the driver compiling its pipelines. Measure on warm reruns.
 
 ## Next steps
 

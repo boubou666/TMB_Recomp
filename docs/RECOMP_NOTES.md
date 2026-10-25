@@ -453,14 +453,15 @@ spent waiting for VIF1/GS, and the CPU time per frame of each host thread (the f
   threads never ran. Most likely not Windows-specific (not checked on Linux): there the skip landed elsewhere. `runtime/tmb_overrides.cpp` now
   drops a priority-0 caller to priority 1 for the rotation and restores it when it is scheduled again (through
   the padding word 0x1e06cc after `readMpeg`, like `kSubstepReturn`).
-- First Windows numbers (Ryzen 7 7800X3D, RTX 5070 Ti), CPU rasterizer, in the match: 55-90 ms per frame against
-  ~42 ms on the Linux machine. Not investigated yet; MinGW's winpthreads mutexes and condition variables, used
-  by every host thread hand-off, are a first suspect. The GPU renderer works on Windows too (70-85 ms per frame
-  there), but unnamed threads (driver or Granite workers) then use 300-370 ms of CPU per frame, against ~4 ms
-  with the CPU rasterizer: something spins.
+- Windows speed (Ryzen 7 7800X3D, RTX 5070 Ti), same pad script, mean of the `TMB_TRACE_FRAMES` W+B over the
+  match: 27 ms per frame with the CPU rasterizer, 24 ms with paraLLEl-GS (unnamed threads ~2 ms of CPU a frame).
+  No Windows penalty: the first runs right after the build measured 53 and 74 ms (and 300+ ms a frame of unnamed
+  threads on the first Vulkan run), and identical reruns later did not. Most likely background work on the new
+  files (Defender and the indexer scanning the 650 MB exe, its DLLs and 3500 generated files) and the driver
+  compiling paraLLEl-GS's pipelines once; neither was confirmed. Frames are now W ~10 ms (vblank wait) + B
+  ~10-14 ms, so most take one or two vblanks around the 20 ms line.
 
 ## Open
-- Windows: the match runs about half as fast as on Linux.
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
