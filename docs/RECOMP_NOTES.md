@@ -479,9 +479,13 @@ bit, va_list slots, a CD seek/CAV model, SPU2 MADR/BCR, IOP: no interrupt or pre
 interrupts suspended (applied to our `runOthersSlice` too), opt-in wall-clock catch-up once per field
 (`PS2X_EE_CATCHUP=field`) and their diagnostics (`PS2X_STATE_DUMP`, `PS2X_IOP_TRACE_PC`, ...).
 - 546 fork tests pass on Windows. 1026 generated files changed. TMB reaches the match, 0 falls in 8331 vblanks
-  of the bots match. Frame time: 29.9 and 30.5 ms per frame in two runs, against 25.6 and 27.0 before, so
-  probably ~10% slower. Not investigated; first suspects are the GS events now posted with a drawing-time
-  latency and every EE timer event being delivered.
+  of the bots match. Frame time: the two slower runs right after the build (29.9, 30.5 ms) were the post-build
+  skew again; a warm run measured 24.4 ms per frame, as before (25.6, 27.0).
+- The backport broke the match picture: only its top half, stretched to the window. `sceGsResetGraph` now really
+  sets SMODE2, and TMB runs its matches in interlaced FRAME mode (0x3) on 640x256 buffers (circuit 2, PMODE
+  0x8066). The presentation reads (DH+1)/2 buffer lines in that mode, but the backported `sceGsSetDefDispEnv`
+  HLE wrote DH = h-1 = 255, so it read 128 lines. DH counts frame lines: 2h-1 in FRAME mode (fork `44ebd56`,
+  with a test).
 - `PS2X_EE_CATCHUP=field` on TMB: the pad script, timed in host seconds, then lands on other screens and the run
   did not reach the match in 240 s. Not looked into; TMB keeps the full catch-up.
 
