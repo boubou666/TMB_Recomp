@@ -547,6 +547,30 @@ producing 48000 frames a second, rate ~1.0, no drops. The music after the movies
 - Next for 50 fps: the VU1 path itself (a cheaper block protocol for loops, or independent microprogram batches
   on two threads, see HANDOFF).
 
+## VU1 compiled blocks made cheaper (2026-10-26)
+Measured by line, not guessed: `-DTMB_VU1_AOT_LINES=ON` builds the microcode with line tables (a separate tree,
+e.g. `build/prof`), and `tools/vu1_lineprof.py` maps a `PS2X_PROFILE` of `tmb_vu1_replay` to the jit helpers.
+Before, on the replay thread: FMAC helpers ~23%, `leave` (end of block) 10%, the tool's own copies ~17%, xgkick
+progress 4%, register reload 3%, `blockReady` 3%, `commitFlags` 4%, MinGW's `fegetround`/`fesetround` 3%.
+
+Fork changes, all exact on the 6000 recorded runs (`build/vu1_match.trace`):
+- `leave`: `markPairWritesAt` on every pair is folded at compile time into one store per written lane (last writer
+  per lane, maxima over the writes). 10% -> 3.5% of the thread.
+- `VU1Interpreter::run` switches MXCSR and the x87 control word to round toward zero directly, only when needed.
+- Operand normalization as a clamp of the magnitude bits; `commitFlags` checks inline before calling out.
+- One-pair blocks (a lone pair between a branch's delay slot and a branch target) are recompiled too.
+- Tried and dropped: one branch instead of two in `normalizeUnobserved` (its 4% was sample skid, no gain).
+
+Replay: 33.9 -> 26.7 ms per pass. In the game (three interleaved 200 s pairs into the match): VIF1/VU1 worker
+15.0 -> 12.8 ms per frame, W+B 23.8 -> 22.1 ms (noisier). After a fork update like this one, regenerate the
+microcode: `scripts/recomp.sh`, or only `build/tools/ps2xRecomp/ps2_vu_aot game/SCES_503.60 <dir>/vu1` and copy
+the changed files into `generated/vu1/`.
+
+What is left in the blocks is mostly the FMAC itself (~30% now: the PS2 addition `vuAdd4`, operand normalization,
+the unobserved-flag range check) and fixed per-block costs (`blockReady`, register reload, dispatch in `run`).
+The fork also gained VU0 macro FMAC flags in the recompiler (another port's fix): TMB's EE code picks them up only
+when regenerated, not yet measured here.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
