@@ -38,9 +38,10 @@ def main():
     times = [s[0] for s in samples]
     ends = [t for t, k, _ in events if k == 'E']
     names = ('game', 'vif1', 'gs')
+    event_times = [t for t, _, _ in events]
     rows = []
     for start, end in zip(ends, ends[1:]):
-        inside = [(t, k, a) for t, k, a in events if start <= t < end]
+        inside = events[bisect_left(event_times, start):bisect_left(event_times, end)]
         r = {'start': start, 'dur': end - start,
              'vblanks': sum(1 for _, k, _ in inside if k == 'B'),
              'fields': next((a for _, k, a in inside if k == 'U'), 0)}
@@ -80,6 +81,17 @@ def main():
     for r in rows:
         hist[round(r['dur'])] = hist.get(round(r['dur']), 0) + 1
     print('frame times (ms: count):', ', '.join(f'{k}: {v}' for k, v in sorted(hist.items())))
+    # Fast frames (one vblank) against slow ones (two or more): which thread grows.
+    for label, group in (('1 vblank', [r for r in rows if r['vblanks'] <= 1]),
+                         ('2+ vblanks', [r for r in rows if r['vblanks'] >= 2])):
+        if group:
+            g = lambda key: sum(r[key] for r in group) / len(group)
+            print(f'{label:>10}: {len(group)} frames, {g("dur"):.1f} ms | CPU game {g("game"):.1f} vif1 {g("vif1"):.1f} '
+                  f'gs {g("gs"):.1f} ms | game waits: end sync {g("endsync"):.1f}, other syncpath {g("syncpath"):.1f}, '
+                  f'syncV {g("syncv"):.1f} ms')
+    slow = [i for i, r in enumerate(rows) if r['vblanks'] >= 2]
+    if slow:
+        print('first slow frames:', ' '.join(str(i) for i in slow[:12]))
 
     first = int(sys.argv[2]) if len(sys.argv) > 2 else n // 2
     count = int(sys.argv[3]) if len(sys.argv) > 3 else 4

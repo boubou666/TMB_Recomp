@@ -598,6 +598,24 @@ game layer reports (`PS2Runtime::noteGameFrame`, which TMB calls at the end of e
 or else display buffer flips. TMB never moves DISPFB between vblanks, hence its own report. On by default here.
 In the match: 50 fps in quiet stretches, mid-20s when the scene gets busy.
 
+## Busy scenes: what limits the frame (2026-10-26)
+Two 150 s timelines of the match (`TMB_TRACE_TIMELINE_START=300 TMB_TRACE_TIMELINE_SECONDS=150`) and profiles of only
+the slow frames and only the fast ones (`PS2X_PROFILE_GATED=1`, TMB opens the gate while frames take two vblanks;
+`TMB_PROFILE_FAST_FRAMES=1` inverts it). The match runs at 45-50 fps most of the time and drops to 25-35 fps in
+stretches of 20-60 s (more cars and effects on screen).
+- No thread is saturated in the slow stretches: VIF1/VU1 62-74% busy, GS thread 58-67%, game thread ~33%. Where
+  VIF1 reaches 80% elsewhere, the game still holds 46-48 fps.
+- In slow frames VIF1 waits for work 47% of the time, the GS thread 45%, and the game thread waits for VIF1 25%
+  and for the next vblank 40% (the frame missed it).
+- The frame's work is serialized by two `sceGsSyncPath` calls inside it: `particleDraw` (ra 0x1eac28) waits for
+  VIF1 to finish the whole 3D scene `hier` kicked at the vblank (8.5 ms per slow frame, 1.4 ms in quiet play), then
+  `Hud::Update` (ra 0x13de5c) waits for the particles (5.0 ms, 0.07 in quiet play). The game, VIF1 and the GS take
+  turns instead of overlapping, and the chain runs past the next vblank.
+- vif1 and GS look busy in lockstep in the timeline because the GS thread spins (2000 pauses) waiting for packets;
+  its real work is mostly Vulkan submission (`submit_batches` ~22% of its samples).
+- `TMB_TRACE_FRAMES` makes every 100th frame slow (it enumerates the process's threads): leave it off when
+  counting slow frames.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.

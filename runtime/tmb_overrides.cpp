@@ -7,6 +7,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/sampling_profiler_gate.h"
 #include "tmb_host.h"
 #include <string>
 #include <thread>
@@ -567,6 +568,21 @@ namespace
         g_runtime = runtime;
         timelineEvent('E');
         runtime->noteGameFrame(); // the fps overlay
+        // PS2X_PROFILE_GATED=1: the profiler samples while frames take two vblanks or more (busy scenes; they come
+        // in stretches, so the frame after a slow one is mostly slow too), or, with TMB_PROFILE_FAST_FRAMES=1,
+        // while they take one: a profile of each kind from the same build.
+        {
+            static const bool s_fastFrames = []
+            {
+                const char *value = std::getenv("TMB_PROFILE_FAST_FRAMES");
+                return value && *value == '1';
+            }();
+            static uint64_t s_lastTick = 0;
+            const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+            const bool slow = tick - s_lastTick >= 2u;
+            ps2x::profiling::setSampleGate(s_lastTick != 0 && slow != s_fastFrames);
+            s_lastTick = tick;
+        }
         if (g_traceFrames)
             traceFrameEnd();
         const uint32_t gp = getRegU32(ctx, 28);
@@ -636,7 +652,8 @@ namespace
         ctx->pc = s.ret;
     }
 
-    // TMB_TRACE_TIMELINE=<file>: 4 s of the match (from its 500th TheGame::Update) as a timeline, for
+    // TMB_TRACE_TIMELINE=<file>: 4 s of the match (from its 500th TheGame::Update; TMB_TRACE_TIMELINE_START and
+    // TMB_TRACE_TIMELINE_SECONDS move and stretch the window) as a timeline, for
     // tools/timeline.py: the game's events (vblank handler, Update, hier, sceGsSyncPath / sceGsSyncV enter and exit,
     // end of the real-time processing) and, every 0.2 ms, the CPU time of the game, vif1 and gs threads.
     struct Timeline
@@ -655,6 +672,8 @@ namespace
         std::string path;
         std::atomic<int> state{0}; // 0 waiting, 1 recording, 2 done
         uint32_t updates = 0;
+        uint32_t startUpdate = 500u;
+        int64_t durationNs = 4000000000ll;
         int64_t startNs = 0;
         std::mutex mutex;
         std::vector<Event> events;
@@ -723,7 +742,7 @@ namespace
                     std::lock_guard<std::mutex> lock(g_timeline.mutex);
                     g_timeline.samples.push_back(sample);
                 }
-                if (sample.ns - g_timeline.startNs > 4000000000ll)
+                if (sample.ns - g_timeline.startNs > g_timeline.durationNs)
                 {
                     g_timeline.state.store(2);
                     timelineDump();
@@ -755,7 +774,7 @@ namespace
         Substeps &s = g_substeps;
         if (!g_timeline.path.empty() && s.steps == 0)
         {
-            if (g_timeline.state.load() == 0 && ++g_timeline.updates == 500u)
+            if (g_timeline.state.load() == 0 && ++g_timeline.updates == g_timeline.startUpdate)
                 timelineStart();
             timelineEvent('U', static_cast<uint32_t>(*gpGlobal(rdram, kFieldsLastFrameGpOffset)));
         }
@@ -879,6 +898,10 @@ namespace
         if (const char *timeline = std::getenv("TMB_TRACE_TIMELINE"); timeline && *timeline)
         {
             g_timeline.path = timeline;
+            if (const char *start = std::getenv("TMB_TRACE_TIMELINE_START"); start && *start)
+                g_timeline.startUpdate = static_cast<uint32_t>(std::max(1, std::atoi(start)));
+            if (const char *seconds = std::getenv("TMB_TRACE_TIMELINE_SECONDS"); seconds && *seconds)
+                g_timeline.durationNs = static_cast<int64_t>(std::max(1.0, std::atof(seconds)) * 1e9);
             runtime.registerFunction(0x00204E28u, &sceGsSyncPathTimeline);
             runtime.registerFunction(0x00204D90u, &sceGsSyncVTimeline);
         }
