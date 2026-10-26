@@ -647,6 +647,29 @@ stretches of 20-60 s (more cars and effects on screen).
   depending on what else ran (other ports' builds; a timeline counts a thread that gets no CPU as idle). Only
   in-run A/B comparisons hold.
 
+## VU1 on two threads: feasibility (2026-10-26)
+`tmb_vu1_replay <trace> parallel` (fork): for each run, replays it from the state a second thread would have had
+(every register and VU data byte the run before changed put back, unless VIF1 rewrote it since) and compares its
+GS packets, data and register writes with the recording; then which earlier runs each one depends on, and the
+time 1-3 workers would take with a handover cost per task. `PS2X_PARALLEL_CONTROL=1` (nothing put back: all runs
+must come out independent) checks the method; `PS2X_PARALLEL_RECORDS=1` takes each MSCNT as a run of its own.
+On `build/vu1_match.trace` (6000 records, ~2.7 frames of the match):
+- 5145 of the 5149 MSCNTs follow new VIF1 data: TMB feeds batches to running microcode. Per MSCAL with its
+  MSCNTs (851 runs), 99% of the cycles depend on the run just before (ACC, I, Q, ~25 VF registers, data pages):
+  1.02x with 2 workers, 1.10x unlimited.
+- Per batch (6000): 52% of the cycles are in batches independent of the one before, 32% of the six before. Graph
+  on 2 workers: 1.39x with free handovers, 1.26x at ~0.85 us each, 1.06x at ~2.5 us, slower at ~8.5 us
+  (3 workers: 1.58 / 1.46 / 1.27 / 0.87x). Batches are 2-9 us (~2200 a frame), chains short (5060 tasks).
+- Two single batches of ~616k VU cycles (~5.5 ms each, the vertex loop at pc 0x1d40) are 36% of the cycles,
+  each dependent on the batch before: no batch-level split shortens them.
+- Not worth building: a realistic handover (16 KB VU memory copied for the speculative run, merged back, the
+  worker woken) is 2-3 us, and since half of the cycles depend on the batch before in ways only the run reveals,
+  every LQ/SQ would need read/write tracking and mispredicted batches a re-run. Busy frames would go from 18-24 ms
+  of VU1 to ~17-23 at best realistic overheads, against the 16 ms that matters.
+- Where the time is instead: the big vertex-loop batch (a third of VU1's cycles) is one sequential loop; making
+  its compiled loop cheaper (registers kept across the loop's blocks instead of reloaded at each, see "VU1 compiled
+  blocks made cheaper") is the lever that reaches busy frames directly.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
