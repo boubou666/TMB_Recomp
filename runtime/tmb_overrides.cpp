@@ -566,6 +566,7 @@ namespace
     {
         g_runtime = runtime;
         timelineEvent('E');
+        runtime->noteGameFrame(); // the fps overlay
         if (g_traceFrames)
             traceFrameEnd();
         const uint32_t gp = getRegU32(ctx, 28);
@@ -837,6 +838,8 @@ namespace
         // device the GS falls back to it by itself.
         if (runtime.gsForPresentation().requestParallelRenderer())
             std::cout << "[tmb] GS on the GPU (PS2X_GS_RENDERER=cpu for the CPU rasterizer)" << std::endl;
+        // The game's frame rate at the top right while the speed work goes on (F3 hides it, PS2X_SHOW_FPS=0 is off).
+        tmb::host::setEnvDefault("PS2X_SHOW_FPS", "1");
         // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {

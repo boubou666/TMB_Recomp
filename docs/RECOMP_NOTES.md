@@ -571,6 +571,33 @@ the unobserved-flag range check) and fixed per-block costs (`blockReady`, regist
 The fork also gained VU0 macro FMAC flags in the recompiler (another port's fix): TMB's EE code picks them up only
 when regenerated, not yet measured here.
 
+## FMAC cost in the compiled blocks (2026-10-26)
+FMAC helpers were ~28% of the replay thread: `vuAdd4` 7%, the unobserved-flag range check (`normalizeUnobserved`)
+~9%, operand normalization 4%, the result's trip through memory ~2%. Findings, all exact on the 6000 recorded runs:
+- Every FMAC result went through the stack: stored before the range check, reloaded after it, because the rare
+  fix-up took a pointer. The result now stays in a register; only the fix-up (`Vu1Jit::fixUnobserved`) goes
+  through memory. -3 to -4%.
+- That fix-up (`fmacFlagsWith`'s exact double path) was inlined into every FMAC: out of line (`PS2X_VU_COLD`) the
+  hot loop blocks are 15% smaller, -4%. Code size matters more than instruction latency here: the blocks are
+  ~1 KB of machine code per VU pair.
+- `vuAdd4` builds each operand's mask directly (`~0 << gap`, sign only 24 or more steps below, all ones when an
+  exponent is 0): fewer instructions and a shorter chain. Checked against the scalar `vuAdd` on 80M random and
+  edge-case lanes (zeros, denormals, exponent 255, near and far gaps), 0 differences. -1 to -5%.
+- Tried and dropped, no gain: one branch instead of two in the range check (again), `fmacFlagsWith`'s out-of-range
+  part out of line (slower: few hot blocks read flags), XGKICK copying single qwords on its fast path with a mask
+  instead of a division.
+- Replay A/B now uses min and median of 10 interleaved runs per build (other programs on this machine move single
+  runs by +-1 ms); `tmb_vu1_replay` also prints the thread's own CPU cycles per pass.
+
+Together: replay -4 to -5% against the previous fork build (min 26.9 -> 25.8 ms per pass, median 27.4 -> 26.1).
+In the game the difference stays inside the run-to-run noise (three interleaved pairs, one with another port's
+build running): no regression, no clear gain to quote.
+
+Frame rate counter: the fork draws the game's fps at the top right (`PS2X_SHOW_FPS=1`, F3 toggles), from frames a
+game layer reports (`PS2Runtime::noteGameFrame`, which TMB calls at the end of each frame's real-time processing)
+or else display buffer flips. TMB never moves DISPFB between vblanks, hence its own report. On by default here.
+In the match: 50 fps in quiet stretches, mid-20s when the scene gets busy.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
