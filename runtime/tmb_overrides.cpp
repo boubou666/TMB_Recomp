@@ -35,6 +35,12 @@ namespace ps2_stubs
     std::string mpegDebugSummary(); // Stubs/MPEG.cpp
 }
 
+namespace tmb
+{
+    extern std::atomic<bool> g_rainLiftOff; // runtime/vu1/tmb_vu1_rain.cpp
+    extern std::atomic<uint64_t> g_rainLiftedStrips;
+}
+
 namespace
 {
     constexpr uint32_t kTmbPalEntry = 0x00100008u;
@@ -342,6 +348,64 @@ namespace
     std::mutex g_lagAbMutex;
     LagAbMode g_lagAbModes[2];
     uint64_t g_lastUpdateTick = 0; // vblank count at the last TheGame::Update
+
+    // TMB_RAIN_LIFT_AB=1: the lifted rain (runtime/vu1/tmb_vu1_rain.cpp) off and on every 100 vblanks; per mode,
+    // every 1000 frames: fps, slow frames (two vblanks or more), the VIF1 thread's CPU per frame, the strips lifted.
+    bool g_rainAb = false;
+    struct RainAbMode
+    {
+        uint64_t frames = 0, vblanks = 0, slow = 0, strips = 0;
+        double vif1Ms = 0;
+    };
+    RainAbMode g_rainAbModes[2]; // lifted on, off
+
+    void noteRainAbFrame(PS2Runtime *runtime, uint64_t vblanks)
+    {
+        if (!g_rainAb || vblanks == 0u || vblanks > 10u)
+            return;
+        static int64_t s_vif1Ns = -1;
+        static uint64_t s_strips = 0, s_total = 0;
+        const auto vif1Ns = []
+        {
+            for (const tmb::host::ThreadCpu &thread : tmb::host::threadCpuTimes())
+                if (thread.name == "vif1")
+                    return thread.cpuNs;
+            return int64_t{0};
+        };
+        const int current = tmb::g_rainLiftOff.load(std::memory_order_relaxed) ? 1 : 0;
+        RainAbMode &mode = g_rainAbModes[current];
+        ++mode.frames;
+        mode.vblanks += vblanks;
+        mode.slow += vblanks >= 2u ? 1u : 0u;
+        const int next = (runtime->eeScheduler().currentVSyncTick() / 100u) % 2u == 0u ? 0 : 1;
+        if (next != current || s_vif1Ns < 0)
+        {
+            const int64_t now = vif1Ns();
+            const uint64_t strips = tmb::g_rainLiftedStrips.load(std::memory_order_relaxed);
+            if (s_vif1Ns >= 0)
+            {
+                mode.vif1Ms += static_cast<double>(now - s_vif1Ns) / 1e6;
+                mode.strips += strips - s_strips;
+            }
+            s_vif1Ns = now;
+            s_strips = strips;
+            tmb::g_rainLiftOff.store(next == 1, std::memory_order_relaxed);
+        }
+        if (++s_total % 1000u != 0u)
+            return;
+        const auto describe = [](const RainAbMode &m)
+        {
+            char text[160];
+            std::snprintf(text, sizeof(text), "%llu frames %.1f fps %.1f%% slow, vif1 %.2f ms/frame, %llu strips lifted",
+                          static_cast<unsigned long long>(m.frames), m.vblanks ? 50.0 * m.frames / m.vblanks : 0.0,
+                          m.frames ? 100.0 * m.slow / m.frames : 0.0, m.frames ? m.vif1Ms / m.frames : 0.0,
+                          static_cast<unsigned long long>(m.strips));
+            return std::string(text);
+        };
+        std::fprintf(stderr, "[tmb:rainab] last 1000 frames, lifted: %s | compiled: %s\n",
+                     describe(g_rainAbModes[0]).c_str(), describe(g_rainAbModes[1]).c_str());
+        g_rainAbModes[0] = g_rainAbModes[1] = RainAbMode{};
+    }
 
     void noteLagAbFrame(PS2Runtime *runtime, uint64_t vblanks)
     {
@@ -685,6 +749,7 @@ namespace
             if (s_lastTick != 0)
             {
                 noteLagAbFrame(runtime, tick - s_lastTick);
+                noteRainAbFrame(runtime, tick - s_lastTick);
                 noteIdleFrame(tick - s_lastTick);
             }
             s_lastTick = tick;
@@ -984,6 +1049,7 @@ namespace
             const char *lag = std::getenv("TMB_GS_LAG");
             g_gsLag = lag && *lag == '1';
             g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
+            g_rainAb = std::getenv("TMB_RAIN_LIFT_AB") != nullptr;
         }
         if (const char *idle = std::getenv("TMB_TRACE_IDLE"); idle && *idle == '1')
         {

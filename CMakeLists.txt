@@ -41,7 +41,9 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/runtime/tmb_host.cpp" PROPERTIE
 file(GLOB TMB_VU1_AOT_SOURCES CONFIGURE_DEPENDS "${TMB_GENERATED_DIR}/vu1/*.cpp")
 if(TMB_VU1_AOT_SOURCES)
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS tmb_vu1_aot=4)
-    add_library(tmb_vu1_aot OBJECT ${TMB_VU1_AOT_SOURCES})
+    # With it, microcode loops lifted to native code by hand (runtime/vu1, VU1Interpreter::registerLiftedEntry).
+    file(GLOB TMB_VU1_LIFTED_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/vu1/*.cpp")
+    add_library(tmb_vu1_aot OBJECT ${TMB_VU1_AOT_SOURCES} ${TMB_VU1_LIFTED_SOURCES})
     target_link_libraries(tmb_vu1_aot PRIVATE ps2_runtime)
     set_target_properties(tmb_vu1_aot PROPERTIES UNITY_BUILD OFF JOB_POOL_COMPILE tmb_vu1_aot)
     # TMB_VU1_AOT_LINES=ON: line tables only (-g1), so a profile of the replay maps samples to the jit helpers.

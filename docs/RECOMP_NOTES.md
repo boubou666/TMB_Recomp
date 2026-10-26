@@ -736,6 +736,32 @@ rewrites a hot program as native code from what it computes. `tools/vu_disasm.py
   above ~16 ms). Only the rainy arenas gain; the per-object program at pc 0x1ad0 is the general one, many short
   runs, to look at afterwards.
 
+## The rain, lifted (2026-10-26)
+`runtime/vu1/tmb_vu1_rain.cpp`, on the fork's lifted entries (`ps2_vu1_lifted.h`,
+`VU1Interpreter::registerLiftedEntry`: an entry in place of the compiled code at one pair while its fragment is in
+code memory; `PS2X_VU_LIFTED=0` leaves them out).
+- Recording: `PS2X_VU1_RECORD_PC=<pc>` (fork) keeps only the MSCALs at that pc. `build/vu1_rain_long.trace`: 200
+  rain runs from a play run (175 s on), 17 to 80 strips each.
+- Cycles: a pass takes 35 cycles plus one per wrap (each of the six IBEQs skips a pair when its sign flag is clear),
+  on all 1.3M passes of those runs (measured with a probe entry before writing the kernel).
+- Flags the compiled code computes in the loop: the two box SUBs (FMAND), the alpha SUB (FSAND) and the MADDAz
+  starting the next drop's B transform, only on the kept-drop path; their sticky bits are what the final status
+  register shows. The clip register is two copies (`m_state.clip` and the one CLIP shifts): `Vu1Lifted::setClip`.
+- The kernel: the position chain sequentially, then the three transforms, divisions, FTOI4, CLIPs and the cull
+  test four drops at a time with the same operations (`vuAdd4`, the products, the ±FLT_MAX clamp, the DIV and FTOI
+  rules), the kept drops into VU memory (a culled drop's qwords are written again by the next pass), the state
+  handed to the compiled block for the last pass.
+- Replay: 0 mismatches on the 200 runs (packets, VU memory, registers, flags, cycles), and on the 6000 match runs
+  the same 3146 timing-only differences (exact recording, fast replay) as without it. 113-119 ms for the 200 runs
+  against 273-306 compiled (interleaved); in the profile the kernel is ~48 ns a drop, the compiled loop ~185.
+- In the game (`TMB_RAIN_LIFT_AB=1`: off and on every 100 vblanks in one run, per mode fps, slow frames, VIF1
+  thread CPU and the strips lifted): in the windows with heavy rain 44.9 / 44.3 / 46.9 fps lifted against 43.3 /
+  42.7 / 44.7 compiled, VIF1 8.7 against 11.7 and 6.7 against 7.9 ms a frame in two of them; elsewhere the same
+  within noise. Separate runs (4, alternated) gave 45.9 / 45.7 against 44.4 / 45.1 fps, worst tenth 36.6 / 37.9
+  against 33.2 / 34.5. Rain looks as before.
+- Smaller than the estimate: these runs average ~6600 drops (251k cycles), not the 16000 of the first recording,
+  and the rain is only part of a busy frame's VIF1 work. The per-object program (pc 0x1ad0) is the next target.
+
 ## Freeze while playing (2026-10-26)
 Most games froze after a few minutes of play (cars standing still rarely did): the game hung in
 `snd_SendIOPCommandNoWait: BUFFER 0 FULL`, 989snd's command server (an inline RPC call as IOP thread 11, function

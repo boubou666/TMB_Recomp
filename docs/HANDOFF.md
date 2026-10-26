@@ -81,8 +81,9 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
    the game thread: `voiceSample`, `reverb`, `mixCore`).
 2. **VU1 in busy scenes.** The fast VU1 path is the default (`scripts/recomp.sh`; RECOMP_NOTES "Fast VU1 path"):
    45 fps against 41-43 in play. Two threads are not worth it (RECOMP_NOTES "VU1 on two threads"). Next: lift
-   the hot microprograms to native code (RECOMP_NOTES "Lifting the rain"): the rain (pc 0x1d40, a third of
-   VU1's cycles in the rainy arena) first, then the per-object program at pc 0x1ad0 (another third).
+   the hot microprograms to native code: the rain is done (`runtime/vu1/tmb_vu1_rain.cpp`, RECOMP_NOTES "The rain,
+   lifted": ~4x cheaper, +1.5-2 fps in heavy rain); next the per-object program at pc 0x1ad0 (a third of VU1's
+   cycles, every arena), with the same method: `PS2X_VU1_RECORD_PC`, a probe for its cycles, the replay.
    `tools/vu_disasm.py` reads the code images `tmb_vu1_replay <trace> dumpcode <dir>` writes.
 3. **Afterwards.** Make the GPU renderer the default. Reduce the GS thread's driver overhead: half of its time
    is in the NVIDIA driver, probably too many flushes (`PS2X_GS_PARALLEL_FLUSH=0` only flushes at FINISH and
