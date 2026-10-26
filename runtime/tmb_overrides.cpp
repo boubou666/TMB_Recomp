@@ -733,6 +733,28 @@ namespace
         g_runtime = runtime;
         timelineEvent('E');
         runtime->noteGameFrame(); // the fps overlay
+        // TMB_PLAYER_HEALTH_CAP=<x> (testing): the player car's health (vehicle 0x259c70, float at +1012; +1008 is
+        // what gameCheckPlayerHealth sets it to) held at most x, so a few hits end a life: the game-over
+        // screens within minutes of play.
+        static const float s_healthCap = []
+        {
+            const char *value = std::getenv("TMB_PLAYER_HEALTH_CAP");
+            return value && *value ? static_cast<float>(std::atof(value)) : -1.0f;
+        }();
+        if (s_healthCap >= 0.0f)
+        {
+            float health = 0.0f, maximum = 0.0f;
+            std::memcpy(&health, rdram + 0x00259C70u + 1012u, 4);
+            std::memcpy(&maximum, rdram + 0x00259C70u + 1008u, 4);
+            static uint32_t s_frames = 0;
+            if (++s_frames % 250u == 0u)
+                std::fprintf(stderr, "[tmb:health] %.1f of %.1f\n", health, maximum);
+            if (health > s_healthCap)
+            {
+                health = s_healthCap;
+                std::memcpy(rdram + 0x00259C70u + 1012u, &health, 4);
+            }
+        }
         // PS2X_PROFILE_GATED=1: the profiler samples while frames take two vblanks or more (busy scenes; they come
         // in stretches, so the frame after a slow one is mostly slow too), or, with TMB_PROFILE_FAST_FRAMES=1,
         // while they take one: a profile of each kind from the same build.
