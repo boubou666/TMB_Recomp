@@ -61,4 +61,36 @@ message(STATUS "TMB_Recomp: linking ${_tmb_count} generated source files from ${
 if(TMB_VU1_AOT_SOURCES)
     add_executable(tmb_vu1_replay PS2Recomp/ps2xRuntime/tools/ps2_vu1_replay.cpp $<TARGET_OBJECTS:tmb_vu1_aot>)
     target_link_libraries(tmb_vu1_replay PRIVATE ps2_runtime)
+    if(WIN32)
+        # PS2X_PROFILE=<seconds>: the fork's sampling profiler, to see where the compiled microcode spends its time.
+        target_sources(tmb_vu1_replay PRIVATE PS2Recomp/ps2xRuntime/src/profiling/sampling_profiler.cpp)
+        target_link_libraries(tmb_vu1_replay PRIVATE raylib winmm) # raylib first: winmm has a PlaySound too
+    endif()
+endif()
+
+# Profile-guided optimization (GCC) of the runtime, the IOP and the compiled VU1 microcode, the code the frame time
+# goes to; the generated game code keeps its flags (it would all rebuild). scripts/pgo.sh: GENERATE, a training run
+# into the match, then USE. The profile is specific to this build tree and machine, never committed.
+set(TMB_PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, GENERATE or USE (scripts/pgo.sh)")
+set_property(CACHE TMB_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(TMB_PGO_DIR "${CMAKE_BINARY_DIR}/pgo-profile" CACHE PATH "Where TMB_PGO=GENERATE writes the profile USE reads")
+if(NOT TMB_PGO STREQUAL "OFF" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(TMB_PGO STREQUAL "GENERATE")
+        set(_tmb_pgo_flags "-fprofile-generate=${TMB_PGO_DIR}" -fprofile-update=atomic)
+        target_link_options(ps2EntryRunner PRIVATE "-fprofile-generate=${TMB_PGO_DIR}")
+        target_sources(ps2EntryRunner PRIVATE "${CMAKE_SOURCE_DIR}/runtime/pgo/tmb_pgo_train.cpp")
+        set_source_files_properties("${CMAKE_SOURCE_DIR}/runtime/pgo/tmb_pgo_train.cpp" PROPERTIES
+            SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
+    else()
+        set(_tmb_pgo_flags "-fprofile-use=${TMB_PGO_DIR}" -fprofile-partial-training -fprofile-correction -Wno-missing-profile)
+    endif()
+    foreach(_tmb_pgo_target ps2_runtime ps2_iop tmb_vu1_aot)
+        if(TARGET ${_tmb_pgo_target})
+            target_compile_options(${_tmb_pgo_target} PRIVATE ${_tmb_pgo_flags})
+        endif()
+    endforeach()
+    if(TMB_PGO STREQUAL "GENERATE" AND TARGET tmb_vu1_replay)
+        target_link_options(tmb_vu1_replay PRIVATE "-fprofile-generate=${TMB_PGO_DIR}")
+    endif()
+    message(STATUS "TMB_Recomp: profile-guided optimization ${TMB_PGO} (${TMB_PGO_DIR})")
 endif()

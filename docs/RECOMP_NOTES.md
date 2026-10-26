@@ -525,6 +525,28 @@ producing 48000 frames a second, rate ~1.0, no drops. The music after the movies
   the pictures-ahead limit, which a game can lower (`setMpegMaxPicturesAhead`; TMB: 6, default 128 for VP2).
   The launch recording is clean (no clipping or noise in 110 s), skips still work, the match is unchanged.
 
+## Where the frame goes now; GPU renderer by default (2026-10-26)
+- The timeline (`TMB_TRACE_TIMELINE`) was missing two things since the sc3 backport: the GS thread is now
+  `GSFrontend`, and the vblanks (`B`) only came from the movie-time vblank handler. It now marks every vblank from
+  the scheduler's tick.
+- Quiet run, GPU renderer: 25.9 ms per frame on average, 79% of frames 18-23 ms, the rest 34-43 ms. From the
+  vblank, VIF1 (the VU1 microcode) and the GS thread work in lockstep for 15-16 ms; the game thread is busy only
+  ~9 ms and waits ~8 ms in `sceGsSyncPath` for them. A frame whose VIF1/GS work runs past ~19 ms misses the
+  vblank and takes two. So VIF1/VU1 is the critical path; the GS thread mostly follows it (on the GPU path a
+  third of its time is Vulkan submission; `PS2X_GS_PARALLEL_FLUSH=0` made no measurable difference).
+- The GPU renderer is now TMB's default (`runtime.gsForPresentation().requestParallelRenderer()` in the
+  override): 20-23 ms per frame against 24-27 with the CPU rasterizer. `PS2X_GS_RENDERER=cpu` keeps the CPU
+  rasterizer; without a Vulkan device the GS falls back to it.
+- VU1 in the match (6000 runs recorded with `PS2X_VU1_RECORD`, replayed exactly by `tmb_vu1_replay`): ~1.25M VU
+  cycles a frame at 9.6 ns each; one 616k-cycle program (pc 0x1d40, a vertex loop) is a third of it. Inside the
+  compiled blocks the time is the timing/flag bookkeeping around the math (`blockReady`, `advance`, `leave`, a
+  reload of up to 23 VF registers per 12-pair loop block). `tmb_vu1_replay` now takes `PS2X_PROFILE`.
+- Profile-guided optimization (`scripts/pgo.sh`, `TMB_PGO=GENERATE|USE` on the runtime, IOP and compiled
+  microcode): the VU1 replay is ~12% faster, exact; in the game no measurable gain (25.0 against 25.3 ms per frame
+  over three interleaved pairs, with another port's build running). Opt-in, kept for a quiet measurement.
+- Next for 50 fps: the VU1 path itself (a cheaper block protocol for loops, or independent microprogram batches
+  on two threads, see HANDOFF).
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.

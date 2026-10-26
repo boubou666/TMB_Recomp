@@ -25,14 +25,14 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 Picking the work up elsewhere: [`docs/HANDOFF.md`](docs/HANDOFF.md) (state, how to measure, next steps).
 
 **Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the movies, goes through the menus and level loading, and renders the first match (car, arena, HUD) at
-about 15 to 18 frames per second, bound by the VU1 microcode. Sound, full speed and controls in the match are
-being worked on.
+plays the movies with their sound, goes through the menus and level loading, and runs the first match (cars, arena,
+HUD, bots, music and effects) at about 40 frames per second on a Ryzen 7 7800X3D with the GPU renderer, short of the
+PAL 50, bound by the VU1 microcode. Full speed, controls in the match and saving are being worked on.
 
 | Milestone | |
 |---|:---:|
 | Map and recompile the main ELF (3,572 functions, symbols intact) | ✅ |
-| Link the generated code with the PS2Recomp runtime on Linux | ✅ |
+| Link the generated code with the PS2Recomp runtime on Linux and Windows | ✅ |
 | Boot: EE kernel, the game's own IOP modules, CD reads from the disc files | ✅ |
 | Language selection screen (PAL) | ✅ |
 | Controller input | ✅ |
@@ -40,8 +40,9 @@ being worked on.
 | Title screen and main menu | ✅ |
 | Memory card | ⏳ |
 | Menus, level select, level loading | ✅ |
-| First match: HUD, cars, textured 3D | 🔧 |
-| Sound and music (989SND) | ⏳ |
+| First match: HUD, cars, textured 3D, bots | ✅ |
+| Full speed (50 fps) | 🔧 |
+| Sound and music (989SND, movie audio) | ✅ |
 | Story mode, saving, split screen | ⏳ |
 | Widescreen, higher resolution | ⏳ |
 
@@ -99,6 +100,7 @@ scripts/build_tools.sh                                                  # ps2_re
 scripts/recomp.sh                                                       # ELF + recomp/tmb_sces50360.toml -> generated/ (VU1 microcode -> generated/vu1/)
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game
 scripts/run.sh                                                          # ps2EntryRunner game/SCES_503.60
+scripts/pgo.sh                                                          # optional, experimental: profile-guided rebuild (~200 s of scripted play)
 ```
 
 ### Windows
@@ -150,7 +152,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `TMB_TRACE_FRAMES=1` | Every 100 frames: frame time split, EE idle and VIF1/GS waits, CPU ms per frame of each host thread |
 | `TMB_TRACE_TIMELINE=<file>` | 4 s of the match as a timeline (game events, game/vif1/gs thread CPU every 0.2 ms) for `tools/timeline.py` |
 | `PS2X_IOP_THREAD=1` | Run the IOP on its own thread (experimental, slower in TMB today) |
-| `PS2X_GS_RENDERER=parallel` | Draw on the GPU with paraLLEl-GS (Vulkan; experimental, no speed gain yet) |
+| `PS2X_GS_RENDERER=cpu` | Draw with the CPU rasterizer. The default is the GPU (paraLLEl-GS, Vulkan), which falls back to the CPU when no Vulkan device is found |
 | `TMB_TRACE_POS=<file>` | Every vehicle's position at each collision pass (`scripts/bots.sh` and `tools/falls.py` count the falls) |
 | `TMB_TRACE_BLACKBOX=<file>` | Dump the player vehicle's last 64 frames when its position goes wild |
 | `TMB_GS_SERIAL=1` | Rasterize on the GS thread alone (default: 4 rasterization workers, `PS2X_GS_RASTER_THREADS=<n>`) |

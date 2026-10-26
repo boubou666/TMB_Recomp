@@ -694,15 +694,27 @@ namespace
     {
         // The threads' CPU clocks.
         int64_t clocks[3];
-        const char *names[3] = {"GameThread", "vif1", "gs"};
+        const char *names[3] = {"GameThread", "vif1", "GSFrontend"};
         for (int i = 0; i < 3; ++i)
             clocks[i] = tmb::host::findThreadCpuClock(names[i]);
         g_timeline.startNs = timelineNow();
         g_timeline.state.store(1);
         g_timeline.sampler = std::thread([clocks]()
                                          {
+            // The vblank handler only runs during movies: mark the vblanks from the scheduler's tick instead.
+            uint64_t lastVSyncTick = g_runtime ? g_runtime->eeScheduler().currentVSyncTick() : 0u;
             while (g_timeline.state.load() == 1)
             {
+                if (g_runtime)
+                {
+                    const uint64_t tick = g_runtime->eeScheduler().currentVSyncTick();
+                    if (tick != lastVSyncTick)
+                    {
+                        lastVSyncTick = tick;
+                        std::lock_guard<std::mutex> lock(g_timeline.mutex);
+                        g_timeline.events.push_back({timelineNow(), 'B', static_cast<uint32_t>(tick)});
+                    }
+                }
                 Timeline::Sample sample{timelineNow(), {0, 0, 0}};
                 for (int i = 0; i < 3; ++i)
                     sample.cpu[i] = tmb::host::readThreadCpuNs(clocks[i]);
@@ -820,6 +832,11 @@ namespace
 
     void applyTmb(PS2Runtime &runtime)
     {
+        // Draw on the GPU (paraLLEl-GS, Vulkan): 20-23 ms per frame in the match against 24-27 with the CPU rasterizer,
+        // and the four raster threads' CPU freed. PS2X_GS_RENDERER=cpu keeps the CPU rasterizer; without a Vulkan
+        // device the GS falls back to it by itself.
+        if (runtime.gsForPresentation().requestParallelRenderer())
+            std::cout << "[tmb] GS on the GPU (PS2X_GS_RENDERER=cpu for the CPU rasterizer)" << std::endl;
         // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {
