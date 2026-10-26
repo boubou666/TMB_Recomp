@@ -631,8 +631,18 @@ stretches of 20-60 s (more cars and effects on screen).
   None of the three threads is what the busy frames wait for: the next thing to find is what the EE's
   `waitForEvent` is blocked on in them (a guest semaphore, the IOP, the vblank interrupt's timing).
 - The intermittent sound hang (`snd_SendIOPCommandNoWait: BUFFER 0 FULL`, an IOP call that never returns) came
-  back twice today, once at the level load and once late in a match, both in runs with the sync behaviour changed
-  (mid-frame waits skipped, GS lag A/B); none of the unmodified runs hung.
+  back three times today: at a level load, late in a match, and in a run with nothing changed but tracing. It is
+  not caused by the sync experiments.
+- What the EE waits on (`TMB_TRACE_IDLE=1`, the fork's `EeScheduler::setIdleObserver`: each idle wait with the
+  blocked guest threads, what they wait on and from where, and what woke the EE): in slow frames all of its idle
+  time, 11.8-14 ms per frame, is thread 1 waiting for the vblank at the end of the frame (ra 0x1f7ad8, by
+  timerEndOfRealTimeProcessing), woken by VBlankStart. No semaphore, no IOP/SIF wait, no other guest thread: a
+  slow frame is one whose processing ended just after a vblank, and the game waits for the next.
+- What makes the processing end late, frame by frame (150 s timeline): VIF1's CPU per frame. Under 16 ms, 0.2-2.4%
+  of frames are slow; 16-18 ms 16%, 18-20 ms 29%, 20-22 ms 58%, over 24 ms 92%. Busy scenes put 18-24 ms of
+  VIF1 work (nearly all VU1 microcode) in a frame. The threshold is 16 ms, not 20: the work is kicked about 1 ms
+  after the vblank, and the game still draws the HUD and ends its frame after VIF1 is done. 50 fps in busy scenes
+  needs VU1 25-30% cheaper there, or its work split across threads.
 - This machine is shared: the same build measured ~45, 38 and 25 fps in three runs of the match within an hour,
   depending on what else ran (other ports' builds; a timeline counts a thread that gets no CPU as idle). Only
   in-run A/B comparisons hold.

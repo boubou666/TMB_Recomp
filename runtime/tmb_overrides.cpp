@@ -370,6 +370,53 @@ namespace
         g_lagAbModes[0] = g_lagAbModes[1] = LagAbMode{};
     }
 
+    // TMB_TRACE_IDLE=1: what the EE waits on when every guest thread is blocked (EeScheduler::setIdleObserver),
+    // per frame, added up separately for slow frames (two vblanks or more) and fast ones; every 1500 frames the
+    // largest per class, in ms per frame: "<blocked threads> <- <what woke the EE>".
+    bool g_traceIdle = false;
+    std::vector<EeScheduler::IdleRecord> g_frameIdle;
+
+    void noteIdleFrame(uint64_t vblanks)
+    {
+        if (!g_traceIdle)
+            return;
+        struct Totals
+        {
+            uint64_t frames = 0;
+            std::map<std::string, double> ms;
+        };
+        static Totals s_totals[2];
+        static uint64_t s_frames = 0;
+        if (vblanks != 0u && vblanks <= 10u)
+        {
+            Totals &totals = s_totals[vblanks >= 2u ? 1 : 0];
+            ++totals.frames;
+            for (const EeScheduler::IdleRecord &record : g_frameIdle)
+                totals.ms[record.blocked + " <- " + record.wokenBy] += static_cast<double>(record.nanoseconds) / 1e6;
+        }
+        g_frameIdle.clear();
+        if (++s_frames % 1500u != 0u)
+            return;
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            const Totals &totals = s_totals[kind];
+            if (totals.frames == 0u)
+                continue;
+            std::vector<std::pair<double, std::string>> sorted;
+            double all = 0.0;
+            for (const auto &[key, ms] : totals.ms)
+            {
+                sorted.push_back({ms, key});
+                all += ms;
+            }
+            std::sort(sorted.rbegin(), sorted.rend());
+            std::fprintf(stderr, "[tmb:idle] %s frames: %llu, EE idle %.2f ms per frame\n", kind ? "slow" : "fast",
+                         static_cast<unsigned long long>(totals.frames), all / totals.frames);
+            for (size_t i = 0; i < sorted.size() && i < 12u; ++i)
+                std::fprintf(stderr, "[tmb:idle]   %6.2f ms  %s\n", sorted[i].first / totals.frames, sorted[i].second.c_str());
+        }
+    }
+
     void hierOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         updateGsLag(rdram, runtime);
@@ -636,7 +683,10 @@ namespace
             const bool slow = tick - s_lastTick >= 2u;
             ps2x::profiling::setSampleGate(s_lastTick != 0 && slow != s_fastFrames);
             if (s_lastTick != 0)
+            {
                 noteLagAbFrame(runtime, tick - s_lastTick);
+                noteIdleFrame(tick - s_lastTick);
+            }
             s_lastTick = tick;
         }
         if (g_traceFrames)
@@ -934,6 +984,11 @@ namespace
             const char *lag = std::getenv("TMB_GS_LAG");
             g_gsLag = lag && *lag == '1';
             g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
+        }
+        if (const char *idle = std::getenv("TMB_TRACE_IDLE"); idle && *idle == '1')
+        {
+            g_traceIdle = true;
+            runtime.eeScheduler().setIdleObserver([](const EeScheduler::IdleRecord &record) { g_frameIdle.push_back(record); });
         }
         runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
         runtime.registerFunction(kHier, &hierOverride);
