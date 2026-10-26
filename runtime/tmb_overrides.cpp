@@ -331,6 +331,45 @@ namespace
     double g_hierMs = 0, g_updateMs = 0;
     bool g_traceFrames = false;
 
+    // TMB_GS_LAG_AB: per mode (lag on, off), every 500 frames, the frames, vblanks and slow frames (two vblanks or
+    // more), and the input latency: vblanks from the TheGame::Update whose state a frame shows to the first vblank
+    // after VIF1 finished drawing it (a callback queued behind the frame's packets), the earliest it can be shown.
+    struct LagAbMode
+    {
+        uint64_t frames = 0, vblanks = 0, slow = 0;
+        uint64_t drawn = 0, latencyVblanks = 0, latencyOver2 = 0;
+    };
+    std::mutex g_lagAbMutex;
+    LagAbMode g_lagAbModes[2];
+    uint64_t g_lastUpdateTick = 0; // vblank count at the last TheGame::Update
+
+    void noteLagAbFrame(PS2Runtime *runtime, uint64_t vblanks)
+    {
+        if (!g_gsLagAb || vblanks == 0u || vblanks > 10u)
+            return;
+        static uint64_t s_total = 0;
+        std::lock_guard<std::mutex> lock(g_lagAbMutex);
+        LagAbMode &mode = g_lagAbModes[runtime->memory().gsLag() ? 0 : 1];
+        ++mode.frames;
+        mode.vblanks += vblanks;
+        mode.slow += vblanks >= 2u ? 1u : 0u;
+        if (++s_total % 500u != 0u)
+            return;
+        const auto describe = [](const LagAbMode &m)
+        {
+            char text[160];
+            std::snprintf(text, sizeof(text), "%llu frames %.1f fps %.1f%% slow, latency %.2f vblanks (%.1f%% over 2)",
+                          static_cast<unsigned long long>(m.frames), m.vblanks ? 50.0 * m.frames / m.vblanks : 0.0,
+                          m.frames ? 100.0 * m.slow / m.frames : 0.0,
+                          m.drawn ? static_cast<double>(m.latencyVblanks) / m.drawn : 0.0,
+                          m.drawn ? 100.0 * m.latencyOver2 / m.drawn : 0.0);
+            return std::string(text);
+        };
+        std::fprintf(stderr, "[tmb:lagab] last 500 frames, lag on: %s | off: %s\n", describe(g_lagAbModes[0]).c_str(),
+                     describe(g_lagAbModes[1]).c_str());
+        g_lagAbModes[0] = g_lagAbModes[1] = LagAbMode{};
+    }
+
     void hierOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         updateGsLag(rdram, runtime);
@@ -338,6 +377,21 @@ namespace
         timelineEvent('H');
         hier__Fi_0x1d40b0(rdram, ctx, runtime);
         timelineEvent('h');
+        // hier draws the state of the TheGame::Update before it (the frame's own Update comes after).
+        if (g_gsLagAb && g_lastUpdateTick != 0u && runtime->memory().vif1Threaded())
+        {
+            const uint64_t updateTick = g_lastUpdateTick;
+            const int lag = runtime->memory().gsLag() ? 0 : 1;
+            runtime->memory().queueVif1Callback([runtime, updateTick, lag]()
+            {
+                const uint64_t shown = runtime->eeScheduler().currentVSyncTick() + 1u;
+                std::lock_guard<std::mutex> lock(g_lagAbMutex);
+                LagAbMode &mode = g_lagAbModes[lag];
+                ++mode.drawn;
+                mode.latencyVblanks += shown - updateTick;
+                mode.latencyOver2 += shown - updateTick > 2u ? 1u : 0u;
+            });
+        }
         if (g_traceFrames)
             g_hierMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
@@ -581,6 +635,8 @@ namespace
             const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
             const bool slow = tick - s_lastTick >= 2u;
             ps2x::profiling::setSampleGate(s_lastTick != 0 && slow != s_fastFrames);
+            if (s_lastTick != 0)
+                noteLagAbFrame(runtime, tick - s_lastTick);
             s_lastTick = tick;
         }
         if (g_traceFrames)
@@ -780,6 +836,8 @@ namespace
         }
         if (g_traceFrames && s.steps == 0)
             g_frameUpdate = std::chrono::steady_clock::now();
+        if (s.steps == 0)
+            g_lastUpdateTick = runtime->eeScheduler().currentVSyncTick();
         s.gp = getRegU32(ctx, 28);
         const int32_t fields = *gpGlobal(rdram, kFieldsLastFrameGpOffset);
         const int32_t steps = std::min(fields, g_maxSubsteps);

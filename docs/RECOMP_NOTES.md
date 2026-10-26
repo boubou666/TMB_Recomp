@@ -621,6 +621,18 @@ stretches of 20-60 s (more cars and effects on screen).
   slow frames, they only showed where the game ends up waiting for VIF1: the VU1 work kicked at the vblank (the
   scene, then the particles) still finishes after the next one. In busy scenes the frame is bounded by VIF1/VU1's
   work from the vblank, not by the game taking turns with it.
+- GS lag retested (bounded to one presented frame), in-run A/B (`TMB_GS_LAG=1 TMB_GS_LAG_AB=1`, every 100
+  vblanks, which now prints per-mode stats and the input latency): 47.3 fps on, 47.4 off over the match; in the busy
+  intervals 42.6 on, 43.4 off (17% and 15% slow frames). Latency, from the TheGame::Update whose state a frame shows
+  to the first vblank after VIF1 drew it: 2.06 vblanks in both modes (5.6% of frames over 2). No gain, no added
+  latency measured: it stays off.
+- With the lag on, slow frames (gated profile) show the game thread waiting for VIF1 much less (9% of its samples
+  against 25%) and for events more (43% against 40%); VIF1 and the GS thread are still idle about half the time.
+  None of the three threads is what the busy frames wait for: the next thing to find is what the EE's
+  `waitForEvent` is blocked on in them (a guest semaphore, the IOP, the vblank interrupt's timing).
+- The intermittent sound hang (`snd_SendIOPCommandNoWait: BUFFER 0 FULL`, an IOP call that never returns) came
+  back twice today, once at the level load and once late in a match, both in runs with the sync behaviour changed
+  (mid-frame waits skipped, GS lag A/B); none of the unmodified runs hung.
 - This machine is shared: the same build measured ~45, 38 and 25 fps in three runs of the match within an hour,
   depending on what else ran (other ports' builds; a timeline counts a thread that gets no CPU as idle). Only
   in-run A/B comparisons hold.
