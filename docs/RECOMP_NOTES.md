@@ -687,6 +687,21 @@ storing the VU registers (~4%) and a return to `run()`.
 - Reverted. Per-block functions, each loading what it uses when it uses it, stay the better shape for GCC. The
   patch is not kept in the tree.
 
+## Fast VU1 path, PCSX2-style (2026-10-26)
+`PS2X_VU_AOT_FAST=1` when generating (fork): VU1 blocks with PCSX2-like accuracy instead of the exact model (VU0, the
+game's physics, stays exact). Plain SSE FMACs with results clamped and no exact flag fix-ups; block entry from the
+current cycle on the block's static schedule, no per-register readiness checks or tables (the DIV/EFU units are
+still waited for; the clock still drives Q/P, flags and XGKICK).
+- IEEE additions changed TMB's big vertex loop (pc 0x1d40): different strips from its first packet in both of its
+  recorded runs. The PS2's truncating addition (`vuAdd4`) is kept; operand clamping made no difference either way
+  (left out, as PCSX2's default). With that: packets, VU memory and registers identical to the exact path on all
+  6000 recorded runs (`--tolerance`), only cycle counts differ.
+- Replay: 23-27% less time per pass (interleaved min/median, loaded machine). What is left: the FMAC (PS2 addition)
+  ~25% of the thread, XGKICK progress 5%, dispatch 4%, the flag queue ~4.5%; block entry/exit 2.5% (was ~23% of
+  the vertex loop).
+- Not yet checked in the game (screenshots, busy-scene frame times): off by default until then. Regenerate with it:
+  `PS2X_VU_AOT_FAST=1 build/tools/ps2xRecomp/ps2_vu_aot game/SCES_503.60 <dir>/vu1`, copy into `generated/vu1/`.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
