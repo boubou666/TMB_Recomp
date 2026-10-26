@@ -632,7 +632,7 @@ stretches of 20-60 s (more cars and effects on screen).
   `waitForEvent` is blocked on in them (a guest semaphore, the IOP, the vblank interrupt's timing).
 - The intermittent sound hang (`snd_SendIOPCommandNoWait: BUFFER 0 FULL`, an IOP call that never returns) came
   back three times today: at a level load, late in a match, and in a run with nothing changed but tracing. It is
-  not caused by the sync experiments.
+  not caused by the sync experiments (found and fixed: "Freeze while playing").
 - What the EE waits on (`TMB_TRACE_IDLE=1`, the fork's `EeScheduler::setIdleObserver`: each idle wait with the
   blocked guest threads, what they wait on and from where, and what woke the EE): in slow frames all of its idle
   time, 11.8-14 ms per frame, is thread 1 waiting for the vblank at the end of the frame (ra 0x1f7ad8, by
@@ -701,6 +701,24 @@ still waited for; the clock still drives Q/P, flags and XGKICK).
   the vertex loop).
 - Not yet checked in the game (screenshots, busy-scene frame times): off by default until then. Regenerate with it:
   `PS2X_VU_AOT_FAST=1 build/tools/ps2xRecomp/ps2_vu_aot game/SCES_503.60 <dir>/vu1`, copy into `generated/vu1/`.
+
+## Freeze while playing (2026-10-26)
+Most games froze after a few minutes of play (cars standing still rarely did): the game hung in
+`snd_SendIOPCommandNoWait: BUFFER 0 FULL`, 989snd's command server (an inline RPC call as IOP thread 11, function
+0x53120) never returned.
+- Reproduced with `tools/play_script.py` (accelerate, steer, fire): 2 freezes in 2 runs, at 277 and 332 s.
+- Where it spun: 989snd's active-voice list (head at module data 0x4a54, voices of 0x38 bytes at 0x6aa0): append
+  (+0x2918) and remove (+0x295c) walk it, and it had become circular (a voice pointing at itself).
+- How: traced with `PS2X_IOP_TRACE_PC=0x54b18,0x54b5c` (append, remove; now with thread, status, I_CTRL and cycle):
+  989snd does not mask interrupts around the list; it relies on priorities. Thread 15 (priority 9) was unlinking
+  voice 37 when the EE's RPC ran the server (priority 58) inline: it appended the same voice 3500 cycles later, in
+  the middle of thread 15's unlink. On the IOP no thread preempts one of equal or higher priority; the inline call
+  ran at once.
+- Fix (fork, `IopEmulator::runThreadsAhead`): before an inline call runs as its server thread, a thread that ended
+  its slice with interrupts disabled, then the Ready threads at the server's priority or above, run until they
+  block (bounded). 3 runs of 10 minutes of play without a freeze afterwards.
+- For the next hunt: a server stuck for 1000 slices prints where its pc spends the time, the code addresses on its
+  stack and its registers.
 
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
