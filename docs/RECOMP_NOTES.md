@@ -615,6 +615,15 @@ stretches of 20-60 s (more cars and effects on screen).
   its real work is mostly Vulkan submission (`submit_batches` ~22% of its samples).
 - `TMB_TRACE_FRAMES` makes every 100th frame slow (it enumerates the process's threads): leave it off when
   counting slow frames.
+- Tried and dropped: `sceGsSyncPath` returning at once for those two calls (pending transfers flushed, the
+  end-of-frame sync kept). In-run A/B over the match, the two modes alternating every 250 vblanks: 38.0 fps with
+  the waits skipped, 38.1 with them, 31% slow frames either way (~5200 frames each). The waits did not cause the
+  slow frames, they only showed where the game ends up waiting for VIF1: the VU1 work kicked at the vblank (the
+  scene, then the particles) still finishes after the next one. In busy scenes the frame is bounded by VIF1/VU1's
+  work from the vblank, not by the game taking turns with it.
+- This machine is shared: the same build measured ~45, 38 and 25 fps in three runs of the match within an hour,
+  depending on what else ran (other ports' builds; a timeline counts a thread that gets no CPU as idle). Only
+  in-run A/B comparisons hold.
 
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
