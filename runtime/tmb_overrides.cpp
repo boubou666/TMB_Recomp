@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <vector>
 #include <cstring>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -157,42 +158,154 @@ namespace
         }
     }
 
+    // Movie audio. The movie player (Sony's ezmpeg sample) gets each PSS audio packet in pcmCallback and copies
+    // its PCM into the audioDec ring (48 KiB), which audioDecSendToIOP drains into 989snd's IOP buffer as it
+    // plays. With libmpeg the demuxer stops when the ring is full; the HLE's stream callbacks have no back-pressure,
+    // and pcmCallback copied what fit and dropped the rest of the packet. A drop shifted the 16-bit PCM by an odd
+    // byte count from then on: full-scale noise through the logo and intro movies, then a buzz when the IOP looped
+    // its last buffers. Here the packets go through a host queue that feeds the ring with the game's own
+    // bookkeeping (audioDecBeginPut/EndPut) as space frees, before every audioDecSendToIOP: no byte is lost.
     constexpr uint32_t kPcmCallback = 0x001ED5F8u;
     constexpr uint32_t kAudioDecSendToIop = 0x00202090u;
+    constexpr uint32_t kAudioDecCreate = 0x00201E18u;
+    constexpr uint32_t kAudioDecReset = 0x00201E90u;
+    constexpr uint32_t kAudioDec = 0x004C7B48u;       // the player's AudioDec
+    constexpr uint32_t kAudioDecHeaderBytes = 0x28u;  // 'SShd' + 'SSbd' headers, kept apart from the ring
+    constexpr uint32_t kReadBufSizeOffset = 0x50008u; // ReadBuf: data[0x50000], then its size
+    std::deque<uint8_t> g_moviePcm;
     uint32_t g_pcmCalls = 0;
     uint32_t g_sendCalls = 0;
+    bool g_traceMovie = false;
 
-    void pcmCallbackTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    uint32_t guestU32(const uint8_t *rdram, uint32_t address)
     {
-        const uint32_t cbData = getRegU32(ctx, 5);
-        pcmCallback__FP7sceMpegP16sceMpegCbDataStrPv_0x1ed5f8(rdram, ctx, runtime);
-        if (g_pcmCalls++ < 8u)
+        uint32_t value = 0;
+        std::memcpy(&value, rdram + (address & 0x1FFFFFFu), sizeof(value));
+        return value;
+    }
+
+    void setGuestU32(uint8_t *rdram, uint32_t address, uint32_t value)
+    {
+        std::memcpy(rdram + (address & 0x1FFFFFFu), &value, sizeof(value));
+    }
+
+    // audioDecBeginPut / audioDecEndPut (0x201f00 / 0x201fa0), with the copy pcmCallback makes in between.
+    void feedMoviePcm(uint8_t *rdram)
+    {
+        const uint32_t ad = kAudioDec;
+        while (!g_moviePcm.empty())
         {
-            std::cerr << "[tmb:pcm] call " << g_pcmCalls << " cbData=0x" << std::hex << cbData
-                      << " ret=" << std::dec << static_cast<int32_t>(getRegU32(ctx, 2)) << std::endl;
+            const uint32_t state = guestU32(rdram, ad + 0x00u);
+            const uint32_t headerFill = guestU32(rdram, ad + 0x2Cu);
+            const uint32_t base = guestU32(rdram, ad + 0x30u);
+            const uint32_t writePos = guestU32(rdram, ad + 0x34u);
+            const uint32_t count = guestU32(rdram, ad + 0x38u);
+            const uint32_t size = guestU32(rdram, ad + 0x3Cu);
+            if (size == 0u)
+                return;
+            uint32_t area0 = 0, length0 = 0, area1 = 0, length1 = 0;
+            if (state == 0u)
+            {
+                area0 = ad + 4u + headerFill;
+                length0 = kAudioDecHeaderBytes - headerFill;
+                area1 = base;
+                length1 = size;
+            }
+            else
+            {
+                const uint32_t free = size - count;
+                area0 = base + writePos;
+                length0 = std::min(free, size - writePos);
+                area1 = base;
+                length1 = free - length0;
+            }
+            const uint32_t take =
+                static_cast<uint32_t>(std::min<size_t>(g_moviePcm.size(), static_cast<size_t>(length0) + length1));
+            if (take == 0u)
+                return;
+            for (uint32_t i = 0; i < take; ++i)
+                rdram[(i < length0 ? area0 + i : area1 + (i - length0)) & 0x1FFFFFFu] = g_moviePcm[i];
+            g_moviePcm.erase(g_moviePcm.begin(), g_moviePcm.begin() + take);
+
+            uint32_t ringBytes = take;
+            if (state == 0u)
+            {
+                const uint32_t header = std::min(kAudioDecHeaderBytes - headerFill, take);
+                setGuestU32(rdram, ad + 0x2Cu, headerFill + header);
+                if (headerFill + header >= kAudioDecHeaderBytes)
+                    setGuestU32(rdram, ad + 0x00u, 1u);
+                ringBytes -= header;
+            }
+            setGuestU32(rdram, ad + 0x34u, (writePos + ringBytes) % size);
+            setGuestU32(rdram, ad + 0x38u, count + ringBytes);
+            setGuestU32(rdram, ad + 0x40u, guestU32(rdram, ad + 0x40u) + ringBytes);
         }
     }
 
-    void audioDecSendToIopTrace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    // pcmCallback(mpeg, cbData, readBuf): the packet minus its 4-byte sub-header (ff a0 00 00), which may wrap
+    // around the read buffer, goes to the queue.
+    void pcmCallbackOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        (void)runtime;
+        const uint32_t cbData = getRegU32(ctx, 5);
+        const uint32_t readBuf = getRegU32(ctx, 6);
+        const uint32_t data = guestU32(rdram, cbData + 0x08u);
+        const uint32_t length = guestU32(rdram, cbData + 0x0Cu);
+        const uint32_t ringSize = guestU32(rdram, readBuf + kReadBufSizeOffset);
+        if (length > 4u && ringSize != 0u)
+        {
+            const uint32_t ringEnd = readBuf + ringSize;
+            uint32_t source = data + 4u;
+            if (source >= ringEnd)
+                source -= ringSize;
+            const uint32_t bytes = length - 4u;
+            const uint32_t first = std::min(bytes, ringEnd - source);
+            for (uint32_t i = 0; i < bytes; ++i)
+                g_moviePcm.push_back(rdram[(i < first ? source + i : readBuf + (i - first)) & 0x1FFFFFFu]);
+            feedMoviePcm(rdram);
+        }
+        if (g_traceMovie && g_pcmCalls < 8u)
+            std::cerr << "[tmb:pcm] call " << g_pcmCalls + 1u << " cbData=0x" << std::hex << cbData << std::dec
+                      << " bytes " << length << " queued " << g_moviePcm.size() << std::endl;
+        ++g_pcmCalls;
+        setReturnS32(ctx, 1);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    void audioDecSendToIopOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        feedMoviePcm(rdram);
         const uint32_t ad = getRegU32(ctx, 4);
-        const auto rd = [&](uint32_t off) { return *reinterpret_cast<const int32_t *>(rdram + ((ad + off) & 0x1FFFFFFu)); };
+        const auto rd = [&](uint32_t off) { return static_cast<int32_t>(guestU32(rdram, ad + off)); };
         const int32_t stateBefore = rd(0x0);
         audioDecSendToIOP__FP8AudioDec_0x202090(rdram, ctx, runtime);
-        if ((g_sendCalls++ % 50u) == 0u)
+        if (g_traceMovie && (g_sendCalls++ % 50u) == 0u)
         {
             std::cerr << "[tmb:audio] send#" << g_sendCalls << " state " << stateBefore << "->" << rd(0x0)
                       << " +0x30=" << rd(0x30) << " +0x34=" << rd(0x34) << " +0x38=" << rd(0x38)
                       << " +0x3c=" << rd(0x3c) << " +0x44=0x" << std::hex << rd(0x44) << std::dec
-                      << " +0x48=" << rd(0x48) << " +0x54=" << rd(0x54) << " pcmCalls=" << g_pcmCalls << std::endl;
+                      << " +0x48=" << rd(0x48) << " +0x54=" << rd(0x54) << " pcmCalls=" << g_pcmCalls
+                      << " queued=" << g_moviePcm.size() << std::endl;
         }
+    }
+
+    // A new movie (or a reset one) starts from an empty queue.
+    void audioDecCreateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_moviePcm.clear();
+        audioDecCreate__FP8AudioDecPUcii_0x201e18(rdram, ctx, runtime);
+    }
+
+    void audioDecResetOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_moviePcm.clear();
+        audioDecReset__FP8AudioDec_0x201e90(rdram, ctx, runtime);
     }
 
     constexpr uint32_t kVblankHandler = 0x001C2898u;
     uint32_t g_vblankCalls = 0;
     bool g_gsLag = false;
     bool g_gsLagAb = false;
-    bool g_traceMovie = false;
 
     // The GS lag (fork, PS2Memory::setGsLag: the GS and VU1 may finish a frame while the game runs the next) is
     // off while a movie plays: the main thread then waits for the decoder in a loop that only rotates the
@@ -761,7 +874,20 @@ namespace
         {
             startThreadTrace(runtime, std::max(0.5, std::atof(period)));
         }
+        // Movie audio arrives as far ahead as the libmpeg HLE demuxes video: by default up to 128 decoded pictures
+        // (5 s), far more than the player's 48 KiB ring and 989snd's 24 KiB IOP buffer (about 375 ms) hold. The PCM
+        // queue (pcmCallbackOverride) loses nothing either way; a lead of a few pictures keeps it short.
+        {
+            size_t picturesAhead = 6u;
+            if (const char *value = std::getenv("TMB_MOVIE_PICTURES_AHEAD"); value && *value)
+                picturesAhead = static_cast<size_t>(std::max(1, std::atoi(value)));
+            ps2_stubs::setMpegMaxPicturesAhead(picturesAhead);
+        }
         runtime.registerFunction(kVideoDecAbort, &videoDecAbortOverride);
+        runtime.registerFunction(kPcmCallback, &pcmCallbackOverride);
+        runtime.registerFunction(kAudioDecSendToIop, &audioDecSendToIopOverride);
+        runtime.registerFunction(kAudioDecCreate, &audioDecCreateOverride);
+        runtime.registerFunction(kAudioDecReset, &audioDecResetOverride);
         runtime.registerFunction(kSwitchThread, &switchThreadOverride);
         runtime.registerFunction(kSwitchThreadReturn, &switchThreadReturn);
         if (const char *trace = std::getenv("TMB_TRACE_FONT"); trace && *trace == '1')
@@ -771,8 +897,6 @@ namespace
         if (const char *trace = std::getenv("TMB_TRACE_MOVIE"); trace && *trace == '1')
         {
             runtime.registerFunction(kTermAll, &termAllTrace);
-            runtime.registerFunction(kPcmCallback, &pcmCallbackTrace);
-            runtime.registerFunction(kAudioDecSendToIop, &audioDecSendToIopTrace);
             g_traceMovie = true;
         }
 

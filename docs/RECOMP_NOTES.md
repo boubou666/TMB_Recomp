@@ -503,6 +503,28 @@ search). In the same profile (blocks off) the game thread spends ~29% of its tim
 ~23% spinning on an atomic load (waiting for VIF1/GS), with the IOP, SPU2 and the game's own code small: the
 frame is bound by the VIF1/VU1 and GS threads, which is where the next speed work goes.
 
+## Movie sound (2026-10-26)
+Sound in the match was fine; at launch it was unbearable. A recording of the SPU2 output (`PS2X_SPU2_WAV`) put
+the damage in the logo and intro movies: full-scale noise (clipping, nearly all its energy in sample-to-sample
+jumps), then a steady buzz. The time stretcher was not involved: `PS2X_SPU2_STATS=1` (new) showed the emulation
+producing 48000 frames a second, rate ~1.0, no drops. The music after the movies was clean.
+- Movie audio does play in this player (the old note saying `isAudioOK` short-circuits is out of date):
+  pcmCallback copies each PSS audio packet (`ff a0 00 00` sub-header, then 16-bit little-endian PCM in 512-byte
+  L/R blocks, after a 40-byte `SShd`/`SSbd` header) into the audioDec ring (48 KiB at 0x683880), and
+  audioDecSendToIOP moves it into 989snd's 24 KiB IOP buffer (0x856b0, two 12 KiB halves played by AutoDMA).
+  `snd_GetTransStatus` reports the AutoDMA position correctly.
+- The bytes reaching the SPU2 input matched the movie for the first five blocks, then sat at an odd offset in
+  the 1024-byte L/R period: one packet (4073 bytes) had been dropped. With libmpeg the demuxer stops when a
+  callback cannot take a packet; the HLE runs the callbacks later, ignores what they return, and the game's
+  pcmCallback copied what fit and dropped the rest. The HLE also took the whole 320 KiB read buffer per call,
+  decoding ~24 pictures and delivering ~1 s of audio at once, then nothing for as long (the buzz: the IOP
+  looping its two halves).
+- Fixes: `runtime/tmb_overrides.cpp` replaces pcmCallback with a host queue that feeds the ring through
+  audioDecBeginPut/EndPut's bookkeeping as space frees (before every audioDecSendToIOP): nothing is lost, every
+  AutoDMA block lands on the L/R period. The fork's sceMpegDemuxPssRing now takes a CD sector at a time up to
+  the pictures-ahead limit, which a game can lower (`setMpegMaxPicturesAhead`; TMB: 6, default 128 for VP2).
+  The launch recording is clean (no clipping or noise in 110 s), skips still work, the match is unchanged.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
