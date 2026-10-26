@@ -670,6 +670,23 @@ On `build/vu1_match.trace` (6000 records, ~2.7 frames of the match):
   its compiled loop cheaper (registers kept across the loop's blocks instead of reloaded at each, see "VU1 compiled
   blocks made cheaper") is the lever that reaches busy frames directly.
 
+## VU1 loop regions: tried, slower (2026-10-26)
+The vertex loop of the 0x1d40 program (blocks 0x1d80..0x1ed0: 15 blocks, most of 1-3 pairs) is ~25% of the replay
+thread. Per block it paid its entry check (`blockReady`, 11% of the loop), its end (`leave`, 12%), loading and
+storing the VU registers (~4%) and a return to `run()`.
+- Tried: ps2_vu_aot compiled each loop of recompiled blocks (a strongly connected group; 29 found, this one with
+  all 15 blocks) as one function keeping the VU registers in locals from block to block, going on to the next
+  block directly while `run()` would have issued it, written back only when leaving. Exact on the 6000 recorded
+  runs.
+- Slower: +5% per pass with one dispatch switch, +6% (min) / +11% (median) with direct jumps between blocks. In
+  the profile the entry checks and ends shrank (5% each) and the loads/stores went, but the FMAC code doubled
+  (33% -> 64% of the loop): the region function has 3226 stack accesses against ~1500 for the same blocks as
+  separate functions. The loop uses ~25 of the VU's 32 vector registers; kept live across the whole loop they do
+  not fit x86's 16 and GCC spills them inside the arithmetic. With AVX-512 (32 registers, tried on this Ryzen) the
+  region got worse still (5812 stack accesses): GCC's allocator on one large looping function is the problem.
+- Reverted. Per-block functions, each loading what it uses when it uses it, stay the better shape for GCC. The
+  patch is not kept in the tree.
+
 ## Open
 - A small striped rectangle under "BLACK" on the title logo.
 - Speed (VU1 on its thread is the limit), sound output, controls in the match, memory card.
