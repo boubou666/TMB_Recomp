@@ -38,3 +38,4 @@ ps2_log.txt
 
 # Debug UI layout the runtime writes in the working directory
 imgui.ini
+__pycache__/
