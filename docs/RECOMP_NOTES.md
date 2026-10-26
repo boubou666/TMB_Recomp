@@ -699,8 +699,42 @@ still waited for; the clock still drives Q/P, flags and XGKICK).
 - Replay: 23-27% less time per pass (interleaved min/median, loaded machine). What is left: the FMAC (PS2 addition)
   ~25% of the thread, XGKICK progress 5%, dispatch 4%, the flag queue ~4.5%; block entry/exit 2.5% (was ~23% of
   the vertex loop).
-- Not yet checked in the game (screenshots, busy-scene frame times): off by default until then. Regenerate with it:
-  `PS2X_VU_AOT_FAST=1 build/tools/ps2xRecomp/ps2_vu_aot game/SCES_503.60 <dir>/vu1`, copy into `generated/vu1/`.
+- In the game (both exes with the IOP fix; 4 play runs of 330 s alternated, `tools/play_script.py`,
+  `TMB_TRACE_FRAMES`, a frame captured every 4 s): fps per 100-frame window in the match, exact 41.0 / 43.0 mean,
+  worst tenth 27.3 / 33.4, 41% / 34% of windows under 40 fps; fast 45.0 / 45.3, worst tenth 35.5 / 39.4, 25% / 13%
+  under 40. The VIF1 thread: 11.8-13.2 ms of CPU a frame exact, 9.7-10.2 fast. Pictures: rain, smoke, fire,
+  cars and HUD as with the exact path, no glitch in the 40 frames compared; no freeze.
+- The default since then: `scripts/recomp.sh` generates it; `TMB_VU1_EXACT=1 scripts/recomp.sh` the exact model
+  (for `tmb_vu1_replay` comparisons with cycle counts).
+
+## Lifting the rain: study (2026-10-26)
+Compiling the microcode pair by pair keeps the VU's machinery (schedule, flags, pipelines) around the math. Lifting
+rewrites a hot program as native code from what it computes. `tools/vu_disasm.py` disassembles the code images
+`tmb_vu1_replay <trace> stats` / `dumpcode <dir>` find in a recording.
+- Where VU1's cycles go (`build/vu1_match.trace`, ~2.7 frames in the rainy first arena): code image c7270baf,
+  pc 0x1d40, 2 runs of ~616k cycles (36%); image c9423f5f, pc 0x1ad0, 2120 runs of ~520 (33%), the per-object
+  program; then pcs 0x16f0 (14%), 0x0f50, 0x0000 (6% each).
+- pc 0x1d40 is the rain (compiled fragment 39b4d182198a494a, ELF offset 0x12fa30, pair 936), once a frame: 16000
+  drops (`vf20.w`), each a line from where the drop was on screen last frame to where it is now (VU memory 0-3:
+  this frame's view-projection, 8-11: the previous frame's), alpha fading with depth, culled when off screen or
+  too faint. 160 XGKICKs of 100 lines from a double buffer (qwords 20 and 522), the drop count in the tag.
+- The loop (0x1d80-0x1ed0, ~38 cycles a drop): the drop positions come from a sequential chain,
+  `vf5 = vf10 * vf10.w + vf5 * vf19` per component, wrapped into an 80-unit box around the camera (MAC sign flags
+  read by FMAND, 4 cycles after the SUB that set them). Everything else is per drop and independent: three matrix
+  transforms (MULAw/MADDA chains), DIV by w (Q read 7 pairs later), FTOI4, two CLIPs, the cull test (FCAND on the
+  last two CLIPs, FSAND on the alpha's sign).
+- Cost now, replay of its 2 runs (`build/vu1_rain.trace`): 4.7-5.1 ms a run on the exact path, 3.3-3.4 ms on the
+  fast path, out of ~10 ms of VIF1 thread a frame.
+- Design: a native kernel for the loop with the same PS2 operations in the same order per drop (`vuAdd4` etc.,
+  `ps2_vu1_inline.h`): the chain first, then the transforms 4 or 8 drops at a time (structure of arrays), writing
+  the vertices into VU memory as the program does. It would plug in like a compiled block (an entry for pair 0x1d80
+  that the runtime takes when the fragment's bytes match), run every pass but the last, leave the registers,
+  flags and clip register with nothing in flight, and let the compiled code run the last pass and the XGKICKs.
+  Cycles from a per-pass table (the IBEQs only skip pairs; a skip is one cycle). Checked on the replay: packets,
+  VU memory and registers identical (a longer recording than 2 runs first).
+- Estimate: 0.5-0.8 ms a frame instead of 3.3, ~2.5 ms off the VIF1 thread in this arena (busy frames turn slow
+  above ~16 ms). Only the rainy arenas gain; the per-object program at pc 0x1ad0 is the general one, many short
+  runs, to look at afterwards.
 
 ## Freeze while playing (2026-10-26)
 Most games froze after a few minutes of play (cars standing still rarely did): the game hung in

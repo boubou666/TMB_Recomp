@@ -13,7 +13,13 @@ rm -rf "$STAGING"
 mkdir -p "$STAGING" "$GENERATED"
 sed 's|^output = .*|output = "build/recomp-staging/"|' "$CONFIG" > "$ROOT/build/recomp-staging.toml"
 "$TOOLS_BUILD/ps2xRecomp/ps2_recomp" "build/recomp-staging.toml"
-"$TOOLS_BUILD/ps2xRecomp/ps2_vu_aot" "$ELF" "$STAGING/vu1"
+# VU1 microcode on the fast path (PCSX2-like floats and block timing; RECOMP_NOTES "Fast VU1 path"): 41-43 against
+# 45 fps in play, same pictures. TMB_VU1_EXACT=1 generates the exact model instead (tmb_vu1_replay checks).
+if [ -n "$TMB_VU1_EXACT" ]; then
+    "$TOOLS_BUILD/ps2xRecomp/ps2_vu_aot" "$ELF" "$STAGING/vu1"
+else
+    PS2X_VU_AOT_FAST=1 "$TOOLS_BUILD/ps2xRecomp/ps2_vu_aot" "$ELF" "$STAGING/vu1"
+fi
 
 # -c compares content, not mtimes; --delete drops functions that are no longer generated.
 changed=$(rsync -rc --delete --out-format='%n' "$STAGING/" "$GENERATED/" | grep -vc '/$' || true)

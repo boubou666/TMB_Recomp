@@ -79,10 +79,11 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
    SPU2 events and pending callbacks. Pre-decoded basic blocks, with those checks only at block boundaries and
    invalidation on writes to code, could cut the IOP's cost by 2 to 3 times. Then look at SPU2 mixing (10% of
    the game thread: `voiceSample`, `reverb`, `mixCore`).
-2. **VU1 in busy scenes.** Compiled blocks are now ~15% cheaper in the game (RECOMP_NOTES, "VU1 compiled blocks
-   made cheaper"); profile them by line with `tools/vu1_lineprof.py`. What is left is mostly the exact FMAC
-   (PS2 addition, operand normalization) and fixed per-block costs. The bigger lever would still be running
-   independent microprogram batches on two threads. That is delicate: VU registers carry over between MSCALs.
+2. **VU1 in busy scenes.** The fast VU1 path is the default (`scripts/recomp.sh`; RECOMP_NOTES "Fast VU1 path"):
+   45 fps against 41-43 in play. Two threads are not worth it (RECOMP_NOTES "VU1 on two threads"). Next: lift
+   the hot microprograms to native code (RECOMP_NOTES "Lifting the rain"): the rain (pc 0x1d40, a third of
+   VU1's cycles in the rainy arena) first, then the per-object program at pc 0x1ad0 (another third).
+   `tools/vu_disasm.py` reads the code images `tmb_vu1_replay <trace> dumpcode <dir>` writes.
 3. **Afterwards.** Make the GPU renderer the default. Reduce the GS thread's driver overhead: half of its time
    is in the NVIDIA driver, probably too many flushes (`PS2X_GS_PARALLEL_FLUSH=0` only flushes at FINISH and
    presentation).
