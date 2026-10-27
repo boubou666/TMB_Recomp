@@ -47,7 +47,7 @@ per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the b
 | Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
 | Title screen and main menu | ✅ |
 | Memory card: save, load, overwrite (`game/mc0`, `game/mc1`) | ✅ |
-| Story mode: levels 1 and 2 cleared, progress saved and loaded | ✅ |
+| Story mode: level 1 of 8 cleared (Junkyard, Midtown Suburbs), progress saved and loaded | ✅ |
 | Menus, level select, level loading | ✅ |
 | First match: HUD, cars, textured 3D, bots | ✅ |
 | Deaths, respawns, game over and replay | ✅ |
