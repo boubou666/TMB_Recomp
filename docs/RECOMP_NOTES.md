@@ -762,6 +762,22 @@ code memory; `PS2X_VU_LIFTED=0` leaves them out).
 - Smaller than the estimate: these runs average ~6600 drops (251k cycles), not the 16000 of the first recording,
   and the rain is only part of a busy frame's VIF1 work. The per-object program (pc 0x1ad0) is the next target.
 
+## The per-object program: what lifting it could save (2026-10-27)
+pc 0x1ad0 of image c9423f5f only branches to 0x1748: it is where each MSCNT resumes (the program ends on an E bit
+at 0x1ac0), a batch of a dozen vertices each (~520 cycles, ~800 batches a frame). Per vertex: three light
+distances (RSQRT, ERSQRT, with WAITQ/WAITP), colour, texture coordinates (ITOF12), the projection, CLIP with the
+strip's last three vertices (FCAND/FCOR) and a clipper subroutine (0x26d0) for triangles crossing the guard band.
+- Its compiled blocks (fragment c56a539bc6e90a2b, pairs 745-899 and 1242 on): 15% of the replay of
+  `build/vu1_match.trace` (~0.9 ms a frame of compiled code); the rest of the replay is the tool's own copies and
+  GS, the interpreter's plumbing (XGKICK progress, flag queue, `run`) and the other programs.
+- In the game, slow frames only (`PS2X_PROFILE_GATED=1`, 200 s of a play run): the VIF1 thread is idle (waiting for
+  work) 63% of its samples. Busy 36%: this program 10.1, other microcode 4.8, interpreter plumbing 5.8, VIF UNPACK
+  3.1, XGKICK progress 2.6, handing packets to the GS (enqueue, GIF arbiter) ~6. The game thread: 46.5% waiting
+  for an event (the vblank), 14.6% waiting for VIF1.
+- So lifting it would take at most ~28% of VIF1's busy time in slow frames, less with what a lifted version
+  still costs, and a more complex kernel than the rain (EFU latencies, clip history, the clipper). The frame is a
+  chain (the game builds, VIF1 runs, the GS draws) with each thread idle much of the time.
+
 ## Freeze while playing (2026-10-26)
 Most games froze after a few minutes of play (cars standing still rarely did): the game hung in
 `snd_SendIOPCommandNoWait: BUFFER 0 FULL`, 989snd's command server (an inline RPC call as IOP thread 11, function
