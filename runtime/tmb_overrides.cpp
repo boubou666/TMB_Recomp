@@ -876,7 +876,7 @@ namespace
             static uint32_t s_enemyFrames = 0;
             const bool log = ++s_enemyFrames % 500u == 0u;
             std::string line;
-            for (int32_t index = 0; index < std::min(count, 16); ++index)
+            for (int32_t index = 0; index < std::min(count, 64); ++index)
             {
                 const uint32_t vehicle = g_theGame + static_cast<uint32_t>(index) * 0x2D00u;
                 float health = 0.0f;
@@ -1130,9 +1130,48 @@ namespace
         timelineEvent('v', ra);
     }
 
+    // TMB_KILL_ENEMIES=<s> (testing): every <s> seconds of TheGame::Update, every opponent still alive takes a 10000
+    // point hit through the game's own Vehicle::vehicleTakeHit (0x1ae070: a0 vehicle, a1 hit point, a2 damage, a3
+    // type), so it dies as if shot and the kill counts ("kill 7 enemies to advance"). A scripted run then gets through
+    // story levels without aiming. Called on a copy of the context at the top of the update, where the stack below sp
+    // is free.
+    void killEnemies(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static const uint32_t s_interval = []
+        {
+            const char *value = std::getenv("TMB_KILL_ENEMIES");
+            return value && *value ? static_cast<uint32_t>(std::atof(value) * 50.0) : 0u;
+        }();
+        static uint32_t s_updates = 0;
+        if (s_interval == 0u || g_theGame == 0u || ++s_updates % s_interval != 0u)
+            return;
+        int32_t count = 0;
+        std::memcpy(&count, rdram + ((g_theGame + 0x001B3DB4u) & 0x1FFFFFFu), 4);
+        int killed = 0;
+        for (int32_t index = 0; index < std::min(count, 64); ++index)
+        {
+            const uint32_t vehicle = g_theGame + static_cast<uint32_t>(index) * 0x2D00u;
+            float health = 0.0f;
+            std::memcpy(&health, rdram + ((vehicle + 1012u) & 0x1FFFFFFu), 4);
+            if (vehicle == 0x00259C70u || !(health > 0.0f))
+                continue;
+            R5900Context call = *ctx;
+            SET_GPR_U32(&call, 4, vehicle);
+            SET_GPR_U32(&call, 5, vehicle); // the hit point: only placement for the effects
+            SET_GPR_U32(&call, 6, 10000u);
+            SET_GPR_U32(&call, 7, 0u);
+            vehicleTakeHit__7VehicleP8_fvectorii_0x1ae070(rdram, &call, runtime);
+            ++killed;
+        }
+        if (killed)
+            std::fprintf(stderr, "[tmb:kill] %d of %d vehicles hit\n", killed, count);
+    }
+
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        g_theGame = getRegU32(ctx, 4); // TMB_ENEMY_HEALTH_CAP
+        g_theGame = getRegU32(ctx, 4); // TMB_ENEMY_HEALTH_CAP, TMB_KILL_ENEMIES
+        if (g_substeps.steps == 0)
+            killEnemies(rdram, ctx, runtime);
         Substeps &s = g_substeps;
         if (!g_timeline.path.empty() && s.steps == 0)
         {

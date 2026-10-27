@@ -858,3 +858,21 @@ Brimstone), a level, then the match in split screen (player 1 below, player 2 on
   The default (paraLLEl) path is neutral (48.9 vs 48.0).
 - The GS drawing-time model's default fill rate (fork `ffop/gs-fill-rate`, merged f7f11aa: 8 textured pixels per GS
   cycle, was 4): neutral on TMB (`TMB_AB=fill`, 11 x 1000 frames, within 0.3 fps), which runs with the GS lag off.
+
+## Memory card (2026-10-27)
+TMB's libmc calls (`sceMc*`, bound in the TOML) go to the fork's HLE (`Kernel/Stubs/MemoryCard.cpp`): two formatted
+8 MB cards backed by `game/mc0` and `game/mc1` next to the ELF. At boot the game probes both slots for
+`BESCES-50360/globalFile` (`TwistedMemoryCard::doesTwistedSaveExist`); an empty card gives no prompt.
+- Save: at the end of a story stage the game asks "SELECT A MEMORY CARD SLOT", then "CHOOSE A SAVE SLOT"; the first
+  save creates `BESCES-50360/` with `icon.sys`, `LISTICON.ICO` (75 KB), `globalFile` (72 bytes: settings and
+  unlocks) and `BESCES-50360` (8-byte header, then 20 bytes per saved game). A second save went into a new slot; an
+  occupied slot asks "OVERWRITE SAVE GAME? PREVIOUS SAVE WILL BE LOST" (YES / NO, NO first) and YES rewrites that
+  record.
+- Load: main menu LOAD GAME, the card slot, "CHOOSE A GAME TO LOAD" (both saves listed as "JUNKYARDDOG AT SUBURBS OR
+  FREEWAY (2/8)"), then "CHOOSE A LEVEL" with what the save unlocked; the level loads and plays.
+- Story walkthrough for these tests: `TMB_KILL_ENEMIES=5 TMB_PLAYER_GOD=1`. Every 5 s each opponent alive (TheGame's
+  vehicles, up to 64; a stage opens more after the first wave: 8 then 43 in Midtown Suburbs) takes a 10000-point
+  hit through `Vehicle::vehicleTakeHit` (0x1ae070), called on a copy of the context at the top of
+  `TheGame::Update`, so it dies as if shot and the kill counts. The Junkyard stage and Midtown Suburbs (level 1 of 8)
+  cleared that way; Freeway and Suburbs were then offered as level 2.
+- A pad script that only spams CROSS loops on the overwrite question (NO is first); scripted saves need UP, CROSS.

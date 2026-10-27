@@ -46,7 +46,8 @@ per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the b
 | Controller input | ✅ |
 | Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
 | Title screen and main menu | ✅ |
-| Memory card | ⏳ |
+| Memory card: save, load, overwrite (`game/mc0`, `game/mc1`) | ✅ |
+| Story mode: levels 1 and 2 cleared, progress saved and loaded | ✅ |
 | Menus, level select, level loading | ✅ |
 | First match: HUD, cars, textured 3D, bots | ✅ |
 | Deaths, respawns, game over and replay | ✅ |
@@ -163,6 +164,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_VU_AOT=0` | Interpret the VU1 microcode instead of running the compiled one |
 | `TMB_VBLANK_HOLD=<ms>` | Hold the vblank up to <ms> while a match frame finishes (default 6; 0 off); `TMB_VBLANK_HOLD_AB=1` compares on/off in one run |
 | `TMB_ENEMY_HEALTH_CAP=<x>` | Testing: hold the opponents' health at most x (a scripted run can win its matches) |
+| `TMB_KILL_ENEMIES=<s>` | Testing: every <s> seconds every opponent alive takes a killing hit through the game's own damage function (the kill counts; scripted story runs) |
 | `TMB_AB=<hold\|slice\|lag\|holdlimit\|fill>` | In-run A/B of an experiment, on and off every 100 vblanks, real-time fps and game speed per mode |
 | `TMB_PLAYER_HEALTH_CAP=<x>` | Testing: hold the player car's health at most x (game over within minutes of play) |
 | `TMB_PLAYER_GOD=1` | Testing: the player car's health goes back to its highest value every frame (story walkthroughs) |
