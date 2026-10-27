@@ -876,3 +876,23 @@ TMB's libmc calls (`sceMc*`, bound in the TOML) go to the fork's HLE (`Kernel/St
   `TheGame::Update`, so it dies as if shot and the kill counts. The Junkyard stage and Midtown Suburbs (level 1 of 8)
   cleared that way; Freeway and Suburbs were then offered as level 2.
 - A pad script that only spams CROSS loops on the overwrite question (NO is first); scripted saves need UP, CROSS.
+
+## Native PC port: TMB's 3D data, read from VU1 (2026-10-28)
+Direction from here: a native PC port, no PS2 hardware emulation (renderer, sound, timing native; the fork's emulation
+only as a reference). First piece: a native renderer fed from the game's own 3D data, not from VU1/GS packets.
+`tools/vu1_trace.py` reads `PS2X_VU1_RECORD` traces (VU1 memory and registers before/after each run, the GIF packets
+it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf402.
+- `hier` sends each object to VU1 as part of one VIF1 DMA chain (`hierFlushObjQ`: D1_TADR from the queue,
+  D1_CHCR 0x145); `pktAddVu1Obj(Vu1DmaPkt*, QwData* matrices, _hierobject*, int)` adds an object: its own prebuilt
+  VIF data (`obj+4`) plus the per-frame matrices, lights and texture registers.
+- An object runs in three stages: a setup (`MSCAL 0x0cc8` or `0x1700`) writes VU 27-30 and 176-179 and leaves the
+  object's matrix in vf1-vf4; the vertex pass (`MSCAL 0x0000` -> 0x0ea8) projects the pool at 181.. (count at
+  180.w): `373+i = (M * p_i) / w`, 1/w back into `181+i.w` (checked exactly on record 1166); then strip batches
+  (`MSCNT 0x0f50 / 0x16f0 / 0x1ad0`), double-buffered at TOP 0x234 / 0x31a, one GIF packet each.
+- Pool positions are in world (or object) space: one matrix per object goes straight to GS screen space (x, y around
+  2048). A skinned variant (0x00d0) blends up to three bone matrices per pool vertex (bone offsets, weights / 65536).
+- Strip batch input at TOP: the GIF tag (STQ, RGBAQ, XYZF2 per vertex), then 3 qwords per vertex: normal as unsigned
+  bytes ((v - 128) / 127) with the pool index in w, a colour (RGB + alpha), texture coordinates in 4.12. The batch
+  loop (0x1910) lights each vertex with three point lights (positions 169-171 / vf9-vf11, colours 172-174, range
+  175), ambient (vf29), light directions 165-167, clamps to 255, clips against the guard band (vf31, +-2048) and
+  writes STQ, RGBAQ, XYZF2; the packet starts with A+D writes of TEX0 / TEX1 (the texture).
