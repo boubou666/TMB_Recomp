@@ -1,11 +1,11 @@
-# Handoff (2026-10-25)
+# Handoff (2026-10-27)
 
 Where the work stands and how to pick it up on another machine. Details and history are in `RECOMP_NOTES.md`.
 
 ## Goal
 
-At least **50 fps in the match**. Speed comes before sound and controls. The match runs at about 24 fps today:
-most frames take two vblanks (40 ms), some already take one (20 ms).
+At least **50 fps in the match**. The match runs at about 45 fps on average today (48-49 in light scenes, 35-39
+in the slowest tenth of frames, first arena, Windows, Ryzen 7 7800X3D).
 
 ## Setting up a new machine
 
@@ -29,28 +29,23 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
 
 ## Current state
 
-- **Renderer.** The CPU rasterizer is still the default. The GPU renderer is opt-in with
-  `PS2X_GS_RENDERER=parallel`: paraLLEl-GS, Vulkan compute, in the fork in `gs_parallel.cpp`. It frees about
-  100 ms of CPU per frame (the four raster threads) but gives no fps gain yet. Menus, the level loading screen
-  and the match look right. Two bugs found by checking screens are fixed: SMODE1/SMODE2 were never set, and the
-  PCRTC alpha 0x80 now counts as 1.0. Make it the default once it gives fps.
-- **What limits the frame.** `TMB_TRACE_TIMELINE` and `tools/timeline.py` show it. Each frame, the game thread
-  waits about 14 ms for the vblank. Then the game, vif1 and gs threads work together for 19 to 25 ms. If that
-  fits in 20 ms the frame is one vblank, otherwise two. At two vblanks the game update runs twice (substeps),
-  which makes the next frame long too.
-- **Which thread is over depends on the scene.**
-  - In light scenes it is the game thread. IOP plus SPU2 are about 30% of it (the IOP alone 17% since 989snd's
-    voice search runs natively).
-  - In busy scenes it is VU1, with 17 to 32 ms of microcode per frame. The VU1 AOT code is already tight: it
-    keeps accurate flags and normalization.
-- **Sound hang.** The game could freeze in `snd_SendIOPCommandNoWait` while a level loaded, about one run in
-  four. The fork has two fixes:
-  - an inline RPC server is no longer abandoned when it runs out of budget;
-  - an interrupt that arrives while disabled is held until EnableIntr.
-
-  It has not happened in 8 runs since, but the cause is not proven. If it comes back, look for
-  `[iop:call] ... still running` lines in the log. They show where the server waits and the SPU2's last DMA
-  events.
+- **Playable.** Boot, movies, menus, loading, the match (driving, weapons, AI, sound, HUD), deaths, respawns and
+  the game-over menu (REPLAY restarts the match). No freeze in ~10 scripted play runs since the 989snd fix
+  (RECOMP_NOTES "Freeze while playing"). Only the first (rainy) arena has been played since 2026-10-26; the memory
+  card and the rest of story mode are not checked recently.
+- **Renderer.** The GPU renderer (paraLLEl-GS, Vulkan) is TMB's default; `PS2X_GS_RENDERER=cpu` for the CPU
+  rasterizer.
+- **VU1.** All microcode is compiled ahead of time on the fast path (`scripts/recomp.sh`, PCSX2-like floats,
+  `TMB_VU1_EXACT=1` for the exact model). The rain's loop is native code (`runtime/vu1/tmb_vu1_rain.cpp`, on the
+  fork's lifted entries). Every VU1 change is checked with `tmb_vu1_replay` on `build/vu1_match.trace` (6000
+  runs) and `build/vu1_rain_long.trace` (200 rain runs): results identical.
+- **What limits the frame.** In busy scenes, VU1 (the VIF1 thread): a frame whose VU1 work goes past ~16 ms takes
+  two vblanks. The EE only idles on the end-of-frame vblank; skipping mid-frame waits, the GS lag and VU1 on two
+  threads were measured and gain nothing (RECOMP_NOTES).
+- **Known gaps.** A small striped rectangle under "BLACK" on the title logo. The game-over menu fix came with the
+  fork update of 2026-10-27; which commit fixed it is not known.
+- **Testing aids.** `tools/play_script.py` (a pad script that plays), `TMB_PLAYER_HEALTH_CAP=5` (game over within
+  minutes), `PS2X_SHOW_FPS` (F3), `TMB_TRACE_FRAMES`, `TMB_RAIN_LIFT_AB` (in-run A/B pattern to copy).
 
 ## Measuring
 
@@ -85,7 +80,7 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
    lifted": ~4x cheaper, +1.5-2 fps in heavy rain); next the per-object program at pc 0x1ad0 (a third of VU1's
    cycles, every arena), with the same method: `PS2X_VU1_RECORD_PC`, a probe for its cycles, the replay.
    `tools/vu_disasm.py` reads the code images `tmb_vu1_replay <trace> dumpcode <dir>` writes.
-3. **Afterwards.** Make the GPU renderer the default. Reduce the GS thread's driver overhead: half of its time
+3. **Afterwards.** Measure the other arenas. Reduce the GS thread's driver overhead: half of its time
    is in the NVIDIA driver, probably too many flushes (`PS2X_GS_PARALLEL_FLUSH=0` only flushes at FINISH and
    presentation).
 
@@ -98,7 +93,7 @@ most frames take two vblanks (40 ms), some already take one (20 ms).
   Push the fork first, then bump the submodule here.
 - Run the fork tests before pushing:
   - `cmake --build build/forktests --target ps2x_tests`, then run `../build/forktests/ps2xTest/ps2x_tests` from
-    `PS2Recomp/` (485 tests);
+    `PS2Recomp/` (564 tests);
   - the IOP suites: configure `build/ioptests` from `PS2Recomp` with `-DPS2X_IOP_BUILD_TESTS=ON`.
 - Investigate a failing or slow run before relaunching it. Long builds go through
   `systemd-run --user --unit=tmb-build ...`.
