@@ -14,7 +14,8 @@ VU1 outputs STQ = (s + u0, t + v0, 1) * 1/w, XYZ = (M * p) / w in GS 12.4, and R
   scaled     colour * scale(vf31) + ambient(vf11)                           (0x1098, 0x0f60)
   directional colour * scale(vf31) * sum(light colour 17-19 * max(0, n . dir 6-8)) + ambient(vf11), n = 1 - v / 128
                                                                             (0x16f0, 0x1378)
-  point      colour * vf17 + ambient(vf29) + three point lights (169-175)  (0x1ad0, 0x1748), n = (v - 128) / 127
+  point      colour * VU5 + ambient(vf29) + three spot lights (169-175)     (0x1ad0, 0x1748), n = (v - 128) / 127
+             (92.7% of vertices exact, the rest within a few levels: the light term is not exact yet)
 0x0f50 resumes into whichever of them the previous batch left in vi13.
 """
 import math
@@ -43,7 +44,7 @@ class Strip:
         self.uv_offset = vf[19][:2]
         if mode == 'point':
             self.uv_offset = r.qf(4)[:2]  # this loop reloads vf19 from VU 4 before adding it
-            self.scale, self.ambient = vf[17], vf[29]
+            self.scale, self.ambient = r.qf(5), vf[29]  # the loop reloads vf17 from VU 5
             self.lights = (vf[9], vf[10], vf[11])  # x, y, z of the three lights (transposed)
             self.spot = (r.qf(165), r.qf(166), r.qf(167), r.qf(168))
             self.light_colours = [r.qf(172 + i) for i in range(3)]
@@ -71,7 +72,7 @@ class Strip:
         LX, LY, LZ = self.lights
         D0, D1, D2, CUT = self.spot
         for i in range(3):
-            d = (LX[i] + pos[0], LY[i] + pos[1], LZ[i] + pos[2])
+            d = (-(LX[i] + pos[0]), -(LY[i] + pos[1]), -(LZ[i] + pos[2]))  # vertex to light
             d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
             if d2 <= 0:
                 continue
