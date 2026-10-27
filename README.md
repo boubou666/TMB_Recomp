@@ -126,6 +126,10 @@ Then follow the steps above. `scripts/stage_dlls.sh` copies the DLLs the runner 
 `ps2EntryRunner.exe`, so it can also be started outside the MSYS2 shell. The GPU renderer needs a Vulkan driver
 (any recent NVIDIA, AMD or Intel driver ships one).
 
+`scripts/regress.sh <build-dir> <out-dir>` is the fork's port regression run for TMB: boot movies, menus and a
+Skyscrapers match under the bench lock, with a `summary.txt` (route reached, exit, fps mean and p10, frames over 25 ms,
+errors) and the last frame.
+
 `scripts/analyze.sh` regenerates the TOML from scratch; it discards manual edits, so diff before committing.
 The runner build compiles about 70 MB of generated C++ and takes a while the first time.
 
@@ -159,8 +163,9 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_VU_AOT=0` | Interpret the VU1 microcode instead of running the compiled one |
 | `TMB_VBLANK_HOLD=<ms>` | Hold the vblank up to <ms> while a match frame finishes (default 6; 0 off); `TMB_VBLANK_HOLD_AB=1` compares on/off in one run |
 | `TMB_ENEMY_HEALTH_CAP=<x>` | Testing: hold the opponents' health at most x (a scripted run can win its matches) |
-| `TMB_AB=<hold\|slice\|lag\|holdlimit>` | In-run A/B of an experiment, on and off every 100 vblanks, real-time fps and game speed per mode |
+| `TMB_AB=<hold\|slice\|lag\|holdlimit\|fill>` | In-run A/B of an experiment, on and off every 100 vblanks, real-time fps and game speed per mode |
 | `TMB_PLAYER_HEALTH_CAP=<x>` | Testing: hold the player car's health at most x (game over within minutes of play) |
+| `TMB_PLAYER_GOD=1` | Testing: the player car's health goes back to its highest value every frame (story walkthroughs) |
 | `PS2X_VU_LIFTED=0` | Run the compiled microcode instead of the loops lifted to native code (the rain, `runtime/vu1`) |
 | `PS2X_VU1_RECORD_PC=<pc>` | With `PS2X_VU1_RECORD`: only the microprogram runs starting at that pc |
 | `TMB_MAX_FRAME_MS=<ms>` | Longest frame weapons and debris move over (default 40; slow motion below 25 fps) |

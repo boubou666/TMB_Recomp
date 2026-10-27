@@ -6,6 +6,7 @@
 #include "Stubs/MPEG.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_draw_estimate.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/sampling_profiler_gate.h"
 #include "tmb_host.h"
@@ -412,6 +413,7 @@ namespace
     // being processed, from TheGame::Update to the end of its real-time processing, at most <ms>: a frame that
     // overruns its field by a few ms then takes those ms instead of a second field (40 ms). The game counts one field
     // for it, so it runs that much slower in that frame instead of stuttering.
+    uint32_t g_theGame = 0; // `this` of TheGame::Update
     bool g_vblankHoldNow = false;
     bool g_vblankHoldConfigured = false;
 
@@ -419,14 +421,15 @@ namespace
     // both); per mode, every 1000 frames: frames per second of real time, frames over 25 ms, and the game's speed
     // (fields of 20 ms against real time). Experiments: hold (the vblank hold; also TMB_VBLANK_HOLD_AB=1), slice
     // (equal-priority EE time slicing off, as the real kernel; also TMB_SLICE_AB=1), lag (the GS lag on), holdlimit
-    // (the hold's limit at 12 ms against 6).
+    // (the hold's limit at 12 ms against 6), fill (the GS drawing-time model at 8 pixels a GS cycle against 4).
     enum class AbExperiment
     {
         None,
         Hold,
         Slice,
         Lag,
-        HoldLimit
+        HoldLimit,
+        Fill
     };
     AbExperiment g_ab = AbExperiment::None;
     bool g_abOnNow = false; // the experiment is on in this frame
@@ -445,6 +448,7 @@ namespace
         case AbExperiment::Slice: return "equal-priority slicing off";
         case AbExperiment::Lag: return "GS lag";
         case AbExperiment::HoldLimit: return "hold limit 12 ms (against 6)";
+        case AbExperiment::Fill: return "GS fill 8 px/cycle (against 4)";
         default: return "";
         }
     }
@@ -466,6 +470,9 @@ namespace
             break;
         case AbExperiment::HoldLimit:
             runtime->eeScheduler().setVBlankHoldLimit(std::chrono::microseconds(on ? 12000 : 6000));
+            break;
+        case AbExperiment::Fill: // ffop/gs-fill-rate's default against main's, in the GS drawing-time model
+            runtime->gsForPresentation().setDrawRates(GsDrawEstimate::Rates{on ? 256u : 512u, 32u});
             break;
         default:
             break;
@@ -780,7 +787,8 @@ namespace
     int32_t g_maxFrameTicks = 40 * 576;
 
     // TMB_TRACE_FRAMES=1: every 100 frames, the host time from the end of one frame's real-time processing to the
-    // next TheGame::Update (W: vsync wait, rendering kick, pad) and from there to the end of the processing (B).
+    // next TheGame::Update (W: vsync wait, rendering kick, pad) and from there to the end of the processing (B), and how
+    // many of those frames took over 25 ms in all.
     std::chrono::steady_clock::time_point g_frameEnd, g_frameUpdate;
 
     // CPU time of each host thread per frame since the previous call, by thread name.
@@ -811,7 +819,7 @@ namespace
     void traceFrameEnd()
     {
         static double sumW = 0, sumB = 0, maxW = 0, maxB = 0, sumH = 0, sumU = 0;
-        static uint32_t frames = 0;
+        static uint32_t frames = 0, over25 = 0;
         const auto now = std::chrono::steady_clock::now();
         if (g_frameEnd.time_since_epoch().count() != 0 && g_frameUpdate > g_frameEnd)
         {
@@ -819,19 +827,20 @@ namespace
             const double b = std::chrono::duration<double, std::milli>(now - g_frameUpdate).count();
             sumW += w; sumB += b; maxW = std::max(maxW, w); maxB = std::max(maxB, b);
             sumH += g_hierMs; sumU += g_updateMs;
+            over25 += w + b > 25.0 ? 1u : 0u;
             if (++frames == 100u)
             {
                 static uint64_t s_idle = 0, s_vif1 = 0;
                 const uint64_t idle = g_runtime->eeScheduler().idleWaitNanoseconds();
                 const uint64_t vif1 = g_runtime->memory().vif1WaitNanoseconds();
                 std::fprintf(stderr, "[tmb:frames] W avg %.1f max %.1f ms, B avg %.1f max %.1f ms, hier %.1f, update %.1f, "
-                             "EE idle %.1f, waiting VIF1/GS %.1f | cpu ms/frame:%s\n",
+                             "EE idle %.1f, waiting VIF1/GS %.1f, over 25 ms %u | cpu ms/frame:%s\n",
                              sumW / frames, maxW, sumB / frames, maxB, sumH / frames, sumU / frames,
-                             (idle - s_idle) / 1e6 / frames, (vif1 - s_vif1) / 1e6 / frames, threadCpuPerFrame(frames).c_str());
+                             (idle - s_idle) / 1e6 / frames, (vif1 - s_vif1) / 1e6 / frames, over25, threadCpuPerFrame(frames).c_str());
                 s_idle = idle;
                 s_vif1 = vif1;
                 sumW = sumB = maxW = maxB = sumH = sumU = 0;
-                frames = 0;
+                frames = over25 = 0;
             }
         }
         g_frameEnd = now;
@@ -852,39 +861,53 @@ namespace
             const char *value = std::getenv("TMB_PLAYER_HEALTH_CAP");
             return value && *value ? static_cast<float>(std::atof(value)) : -1.0f;
         }();
-        // TMB_ENEMY_HEALTH_CAP=<x> (testing): the same for the vehicles after the player's in the vehicle array
-        // (0x2200 bytes each, assumed contiguous; the log shows each one's health and maximum to check it), so a
-        // scripted run can kill its way through story mode.
+        // TMB_ENEMY_HEALTH_CAP=<x> (testing): every vehicle but the player's held at most x health, so a scripted run
+        // can kill its way through story mode. The vehicles are TheGame's array (TheGame::GetVehicleFromName, 0x130bc8):
+        // vehicle i at TheGame + i * 0x2D00, their count at TheGame + 0x1B3DB4; TheGame is `this` of TheGame::Update.
         static const float s_enemyCap = []
         {
             const char *value = std::getenv("TMB_ENEMY_HEALTH_CAP");
             return value && *value ? static_cast<float>(std::atof(value)) : -1.0f;
         }();
-        if (s_enemyCap >= 0.0f)
+        if (s_enemyCap >= 0.0f && g_theGame != 0u)
         {
+            int32_t count = 0;
+            std::memcpy(&count, rdram + ((g_theGame + 0x001B3DB4u) & 0x1FFFFFFu), 4);
             static uint32_t s_enemyFrames = 0;
             const bool log = ++s_enemyFrames % 500u == 0u;
             std::string line;
-            for (uint32_t index = 1; index < 10; ++index)
+            for (int32_t index = 0; index < std::min(count, 16); ++index)
             {
-                const uint32_t vehicle = 0x00259C70u + index * 0x2200u;
-                float health = 0.0f, maximum = 0.0f;
-                std::memcpy(&health, rdram + vehicle + 1012u, 4);
-                std::memcpy(&maximum, rdram + vehicle + 1008u, 4);
+                const uint32_t vehicle = g_theGame + static_cast<uint32_t>(index) * 0x2D00u;
+                float health = 0.0f;
+                std::memcpy(&health, rdram + ((vehicle + 1012u) & 0x1FFFFFFu), 4);
                 if (log)
                 {
                     char text[48];
-                    std::snprintf(text, sizeof(text), " %u:%.0f/%.0f", index, health, maximum);
+                    std::snprintf(text, sizeof(text), " %x:%.0f", vehicle, health);
                     line += text;
                 }
-                if (maximum > 0.0f && maximum < 10000.0f && health > s_enemyCap)
+                if (vehicle != 0x00259C70u && health > s_enemyCap)
                 {
                     health = s_enemyCap;
-                    std::memcpy(rdram + vehicle + 1012u, &health, 4);
+                    std::memcpy(rdram + ((vehicle + 1012u) & 0x1FFFFFFu), &health, 4);
                 }
             }
             if (log)
-                std::fprintf(stderr, "[tmb:enemies]%s\n", line.c_str());
+                std::fprintf(stderr, "[tmb:enemies] TheGame %x, %d vehicles:%s\n", g_theGame, count, line.c_str());
+        }
+        // TMB_PLAYER_GOD=1 (testing): the player car's health (float at +1012) back to the highest value seen every
+        // frame, so it never dies (story-mode walkthroughs). Health only falls during a life; a new car starts full.
+        static const bool s_playerGod = std::getenv("TMB_PLAYER_GOD") != nullptr;
+        if (s_playerGod)
+        {
+            static float s_best = 0.0f;
+            float health = 0.0f;
+            std::memcpy(&health, rdram + 0x00259C70u + 1012u, 4);
+            if (health > s_best && health < 10000.0f)
+                s_best = health;
+            else if (health < s_best && health > -10000.0f)
+                std::memcpy(rdram + 0x00259C70u + 1012u, &s_best, 4);
         }
         if (s_healthCap >= 0.0f)
         {
@@ -1109,6 +1132,7 @@ namespace
 
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        g_theGame = getRegU32(ctx, 4); // TMB_ENEMY_HEALTH_CAP
         Substeps &s = g_substeps;
         if (!g_timeline.path.empty() && s.steps == 0)
         {
@@ -1240,6 +1264,8 @@ namespace
             }
             else if (ab == "holdlimit")
                 g_ab = AbExperiment::HoldLimit;
+            else if (ab == "fill")
+                g_ab = AbExperiment::Fill;
         }
         if (const char *idle = std::getenv("TMB_TRACE_IDLE"); idle && *idle == '1')
         {

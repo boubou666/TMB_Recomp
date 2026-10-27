@@ -831,8 +831,8 @@ Snowy Roads"), Prison Passage (3), Skyscrapers (4), Downtown (5), Highway Loop (
 match; the menus barely use it; the old filter on the `update` time took menu windows too):
 - Suburbs: 49.6 fps mean, slowest tenth 49.5, no window under 40. Junkyard: 48.6 / 45.7, 2% under 40. Skyscrapers:
   49.6 / 49.3. Downtown: 49.5 / 49.0. All load, play, respawn; no stuck server, sound stall or error.
-- Prison Passage: to redo. With two other ports' builds at 100% CPU the menu presses landed late and the run went
-  into Story mode (level 1 of 8) at 26 fps; timed menu scripts need a quiet machine.
+- Prison Passage can't be picked in Challenge: the cursor skips it (tools/arena_script.py counts it anyway, so 3
+  lands elsewhere). An earlier run that seemed to regress there was this, not the runtime.
 - Highway Loop, Snowy Roads, Drive-In Movie: not run yet.
 
 ## Two players (2026-10-27)
@@ -841,3 +841,20 @@ could never see player 2. Fork `tmb/pad2-port1` (merged, 69cdd6e): port 1 holds 
 second host gamepad is plugged in, or with `PS2X_PAD2_SCRIPT` (player 2's pad script). Checked with both pads
 scripted: MULTI-PLAYER, 2-4P DEATH MATCH, its options, PLAYER 1 and PLAYER 2 CHOOSE A VEHICLE (player 2 picked
 Brimstone), a level, then the match in split screen (player 1 below, player 2 on top), both HUDs.
+
+## Rear view, renderers, fill rate (2026-10-27)
+- TRIANGLE toggles the rear view: a large inset across the top of the screen (`viewToggleRearViewConfig`, small and
+  large configs, `Hud::BuildRearViewEdge`). In rear-view mode `rtMain` sets two views (`viewGameIsInRearViewMode`
+  -> `$s2 = 2`) and runs `viewUpdate` / `hier2p` per view, so the whole scene is drawn twice. A Skyscrapers match
+  with 10 s holds, frames by window (look_b): rear view off 49.7 fps, VIF1 5.0 ms, GS frontend 5.1 ms, game thread
+  6.0 ms a frame; on 48.8 fps, VIF1 10.5, GS frontend 10.9, game thread 9.2. A light scene absorbs the doubling; a
+  busy one (VIF1 10-12 ms already) goes past 20 ms and drops to two fields a frame (~25 fps). `vehicleSetCsKlod`
+  checks the mode, so the game may already pick cheaper car models for it. The play scripts press TRIANGLE every
+  7 s: fps numbers from them mix both modes.
+- `PS2X_GS_RENDERER=cpu` on main holds 44.8-48.0 fps in a match (paraLLEl-GS 48-49): since the VU1 and frame
+  pacing work the GS is no longer the long pole. Fork `gs/gpu-renderer` (7609b82, phase 1, the CPU rasterizer's
+  accuracy fixes) runs it at 27.9-30.4 fps: the GS frontend thread goes from ~13 to ~29 ms a frame while the four
+  raster threads drop from ~59 to ~41, so work moved onto the single frontend thread; not merged, sc3-port's to fix.
+  The default (paraLLEl) path is neutral (48.9 vs 48.0).
+- The GS drawing-time model's default fill rate (fork `ffop/gs-fill-rate`, merged f7f11aa: 8 textured pixels per GS
+  cycle, was 4): neutral on TMB (`TMB_AB=fill`, 11 x 1000 frames, within 0.3 fps), which runs with the GS lag off.
