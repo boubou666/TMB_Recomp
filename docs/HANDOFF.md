@@ -4,8 +4,9 @@ Where the work stands and how to pick it up on another machine. Details and hist
 
 ## Goal
 
-At least **50 fps in the match**. The match runs at about 45 fps on average today (48-49 in light scenes, 35-39
-in the slowest tenth of frames, first arena, Windows, Ryzen 7 7800X3D).
+At least **50 fps in the match**. The first arena now runs at about 48 fps on average (50 in light scenes, ~44 in the
+slowest tenth of frames; Windows, Ryzen 7 7800X3D) since the vblank hold (RECOMP_NOTES "Slow frames: the vblank
+held while a frame finishes") and sc3-port's faster VU1 AOT on the fork's main.
 
 ## Setting up a new machine
 
@@ -39,11 +40,17 @@ in the slowest tenth of frames, first arena, Windows, Ryzen 7 7800X3D).
   `TMB_VU1_EXACT=1` for the exact model). The rain's loop is native code (`runtime/vu1/tmb_vu1_rain.cpp`, on the
   fork's lifted entries). Every VU1 change is checked with `tmb_vu1_replay` on `build/vu1_match.trace` (6000
   runs) and `build/vu1_rain_long.trace` (200 rain runs): results identical.
-- **What limits the frame.** In busy scenes, VU1 (the VIF1 thread): a frame whose VU1 work goes past ~16 ms takes
-  two vblanks. The EE only idles on the end-of-frame vblank; skipping mid-frame waits, the GS lag and VU1 on two
+- **What limits the frame.** A frame's work starts at a vblank; one that overran its field used to wait a whole
+  second field (40 ms). The vblank hold (`TMB_VBLANK_HOLD`, default 6 ms) lets it take only the overrun. What is
+  left are frames whose VU1 work (the VIF1 thread) goes well past the field. The EE only idles on the end-of-frame vblank; skipping mid-frame waits, the GS lag and VU1 on two
   threads were measured and gain nothing (RECOMP_NOTES).
 - **Known gaps.** A small striped rectangle under "BLACK" on the title logo. The game-over menu fix came with the
   fork update of 2026-10-27; which commit fixed it is not known.
+- **Arenas.** Challenge mode reaches the eight unlocked arenas (Freeway is locked): scratchpad-style runs are in
+  RECOMP_NOTES "Arenas"; one match each was being measured on 2026-10-27.
+- **The room (c2c).** Other ports share the fork's main; their generic fixes reach main after a TMB check (fork
+  tests, `tmb_vu1_replay` on both traces, a scripted play run). Equal-priority EE time slicing is a runtime switch
+  now (`setEqualPrioritySlicing`, `TMB_SLICE_AB=1` for an in-run A/B); whether to turn it off by default is open.
 - **Testing aids.** `tools/play_script.py` (a pad script that plays), `TMB_PLAYER_HEALTH_CAP=5` (game over within
   minutes), `PS2X_SHOW_FPS` (F3), `TMB_TRACE_FRAMES`, `TMB_RAIN_LIFT_AB` (in-run A/B pattern to copy).
 

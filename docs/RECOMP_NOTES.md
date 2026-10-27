@@ -821,3 +821,23 @@ slow frames is that wait, not a thread starved by another.
   speed), quiet machine, busy stretches: 49.1 / 47.5 / 49.7 / 47.9 fps on against 45.7 / 44.8 / 46.2 / 47.1 off,
   frames over 25 ms 3.2 / 7.8 / 1.5 / 7.7% against 11.9 / 13.0 / 9.7 / 6.4%; calm stretches equal (50.0). No sound
   stall. A run on a loaded machine (another session's builds: 14-29 fps both ways) still had it ahead or equal.
+
+## Arenas (2026-10-27)
+Challenge mode reaches the eight unlocked arenas: ONE PLAYER, DOWN to CHALLENGE, a vehicle (Junkyard Dog by
+default), CHOOSE A LEVEL with RIGHT from Suburbs: Junkyard (1), Freeway (2, locked: "unlock with 10 ... kills in
+Snowy Roads"), Prison Passage (3), Skyscrapers (4), Downtown (5), Highway Loop (6), Snowy Roads (7), Drive-In Movie
+(8); CROSS adds opponents, SQUARE starts (START pauses). One match each, driving and firing from 205 s
+(`TMB_TRACE_FRAMES`, a frame every 10 s), windows of 100 frames counted when VIF1 uses 3 ms a frame or more (the
+match; the menus barely use it; the old filter on the `update` time took menu windows too):
+- Suburbs: 49.6 fps mean, slowest tenth 49.5, no window under 40. Junkyard: 48.6 / 45.7, 2% under 40. Skyscrapers:
+  49.6 / 49.3. Downtown: 49.5 / 49.0. All load, play, respawn; no stuck server, sound stall or error.
+- Prison Passage: to redo. With two other ports' builds at 100% CPU the menu presses landed late and the run went
+  into Story mode (level 1 of 8) at 26 fps; timed menu scripts need a quiet machine.
+- Highway Loop, Snowy Roads, Drive-In Movie: not run yet.
+
+## Two players (2026-10-27)
+The SIO2 controller had one DualShock 2 (port 0) and the host read the same pad for every port: MULTI-PLAYER
+could never see player 2. Fork `tmb/pad2-port1` (merged, 69cdd6e): port 1 holds a second DualShock 2 while a
+second host gamepad is plugged in, or with `PS2X_PAD2_SCRIPT` (player 2's pad script). Checked with both pads
+scripted: MULTI-PLAYER, 2-4P DEATH MATCH, its options, PLAYER 1 and PLAYER 2 CHOOSE A VEHICLE (player 2 picked
+Brimstone), a level, then the match in split screen (player 1 below, player 2 on top), both HUDs.

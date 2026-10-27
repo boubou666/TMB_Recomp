@@ -52,7 +52,8 @@ per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the b
 | Deaths, respawns, game over and replay | ✅ |
 | Full speed (50 fps) | 🔧 |
 | Sound and music (989SND, movie audio) | ✅ |
-| Story mode, saving, split screen | ⏳ |
+| Multi-player split screen (two controllers; `PS2X_PAD2_SCRIPT` for a scripted player 2) | ✅ |
+| Story mode, saving | ⏳ |
 | Widescreen, higher resolution | ⏳ |
 
 ✅ works · 🔧 in progress · ⏳ not reached yet
@@ -157,6 +158,8 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for `ps2_vu1_replay` / `build/game/tmb_vu1_replay` (with the compiled microcode; the default fast VU1 path differs in cycle counts only, `TMB_VU1_EXACT=1 scripts/recomp.sh` for the exact one) |
 | `PS2X_VU_AOT=0` | Interpret the VU1 microcode instead of running the compiled one |
 | `TMB_VBLANK_HOLD=<ms>` | Hold the vblank up to <ms> while a match frame finishes (default 6; 0 off); `TMB_VBLANK_HOLD_AB=1` compares on/off in one run |
+| `TMB_ENEMY_HEALTH_CAP=<x>` | Testing: hold the opponents' health at most x (a scripted run can win its matches) |
+| `TMB_AB=<hold\|slice\|lag\|holdlimit>` | In-run A/B of an experiment, on and off every 100 vblanks, real-time fps and game speed per mode |
 | `TMB_PLAYER_HEALTH_CAP=<x>` | Testing: hold the player car's health at most x (game over within minutes of play) |
 | `PS2X_VU_LIFTED=0` | Run the compiled microcode instead of the loops lifted to native code (the rain, `runtime/vu1`) |
 | `PS2X_VU1_RECORD_PC=<pc>` | With `PS2X_VU1_RECORD`: only the microprogram runs starting at that pc |

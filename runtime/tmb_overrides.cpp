@@ -313,6 +313,7 @@ namespace
     uint32_t g_vblankCalls = 0;
     bool g_gsLag = false;
     bool g_gsLagAb = false;
+    bool g_gsLagExperimentOn = true; // TMB_AB=lag: off in the experiment's off stretches
 
     // The GS lag (fork, PS2Memory::setGsLag: the GS and VU1 may finish a frame while the game runs the next) is
     // off while a movie plays: the main thread then waits for the decoder in a loop that only rotates the
@@ -328,7 +329,7 @@ namespace
     {
         if (!g_gsLag)
             return;
-        bool lag = *reinterpret_cast<const int32_t *>(rdram + kMovieDisplaying) == 0;
+        bool lag = *reinterpret_cast<const int32_t *>(rdram + kMovieDisplaying) == 0 && g_gsLagExperimentOn;
         if (g_gsLagAb)
             lag = lag && (runtime->eeScheduler().currentVSyncTick() / 100u) % 2u == 0u;
         runtime->memory().setGsLag(lag);
@@ -410,23 +411,76 @@ namespace
     // TMB_VBLANK_HOLD=<ms>: in the match, the vblank waits (fork, EeScheduler::setVBlankHold) while a frame is still
     // being processed, from TheGame::Update to the end of its real-time processing, at most <ms>: a frame that
     // overruns its field by a few ms then takes those ms instead of a second field (40 ms). The game counts one field
-    // for it, so it runs that much slower in that frame instead of stuttering. TMB_VBLANK_HOLD_AB=1 switches it off
-    // and on every 100 vblanks; per mode, every 1000 frames: frames per second of real time, frames over 25 ms, and
-    // the game's speed (fields of 20 ms against real time).
+    // for it, so it runs that much slower in that frame instead of stuttering.
     bool g_vblankHoldNow = false;
-    int g_vblankHoldMode = 0; // 0 off, 1 on, 2 alternating
-    struct HoldAbMode
+    bool g_vblankHoldConfigured = false;
+
+    // TMB_AB=<experiment>: an in-run A/B, the experiment on and off every 100 vblanks (the same stretches of play for
+    // both); per mode, every 1000 frames: frames per second of real time, frames over 25 ms, and the game's speed
+    // (fields of 20 ms against real time). Experiments: hold (the vblank hold; also TMB_VBLANK_HOLD_AB=1), slice
+    // (equal-priority EE time slicing off, as the real kernel; also TMB_SLICE_AB=1), lag (the GS lag on), holdlimit
+    // (the hold's limit at 12 ms against 6).
+    enum class AbExperiment
+    {
+        None,
+        Hold,
+        Slice,
+        Lag,
+        HoldLimit
+    };
+    AbExperiment g_ab = AbExperiment::None;
+    bool g_abOnNow = false; // the experiment is on in this frame
+    struct AbMode
     {
         uint64_t frames = 0, over25 = 0, fields = 0;
         double ms = 0;
     };
-    HoldAbMode g_holdAbModes[2]; // hold off, on
+    AbMode g_abModes[2]; // off, on
 
+    const char *abExperimentName(AbExperiment experiment)
+    {
+        switch (experiment)
+        {
+        case AbExperiment::Hold: return "vblank hold";
+        case AbExperiment::Slice: return "equal-priority slicing off";
+        case AbExperiment::Lag: return "GS lag";
+        case AbExperiment::HoldLimit: return "hold limit 12 ms (against 6)";
+        default: return "";
+        }
+    }
+
+    void applyAbExperiment(PS2Runtime *runtime, bool on)
+    {
+        g_abOnNow = on;
+        g_vblankHoldNow = g_vblankHoldConfigured;
+        switch (g_ab)
+        {
+        case AbExperiment::Hold:
+            g_vblankHoldNow = on;
+            break;
+        case AbExperiment::Slice:
+            runtime->eeScheduler().setEqualPrioritySlicing(!on);
+            break;
+        case AbExperiment::Lag:
+            g_gsLagExperimentOn = on;
+            break;
+        case AbExperiment::HoldLimit:
+            runtime->eeScheduler().setVBlankHoldLimit(std::chrono::microseconds(on ? 12000 : 6000));
+            break;
+        default:
+            break;
+        }
+    }
+
+    // At the end of each frame's real-time processing: the hold ends, the A/B counts the frame and picks the next mode.
     void noteVblankHoldFrame(PS2Runtime *runtime)
     {
         runtime->eeScheduler().setVBlankHold(false);
-        if (g_vblankHoldMode == 0)
+        if (g_ab == AbExperiment::None)
+        {
+            g_vblankHoldNow = g_vblankHoldConfigured;
             return;
+        }
         static std::chrono::steady_clock::time_point s_last{};
         static uint64_t s_lastTick = 0, s_total = 0;
         const auto now = std::chrono::steady_clock::now();
@@ -434,7 +488,7 @@ namespace
         if (s_last != std::chrono::steady_clock::time_point{} && g_lastUpdateTick > s_lastTick)
         {
             const double ms = std::chrono::duration<double, std::milli>(now - s_last).count();
-            HoldAbMode &mode = g_holdAbModes[g_vblankHoldNow ? 1 : 0];
+            AbMode &mode = g_abModes[g_abOnNow ? 1 : 0];
             if (ms < 200.0)
             {
                 ++mode.frames;
@@ -442,9 +496,9 @@ namespace
                 mode.over25 += ms > 25.0 ? 1u : 0u;
                 mode.fields += tick - s_lastTick;
             }
-            if (g_vblankHoldMode == 2 && ++s_total % 1000u == 0u)
+            if (++s_total % 1000u == 0u)
             {
-                const auto describe = [](const HoldAbMode &m)
+                const auto describe = [](const AbMode &m)
                 {
                     char text[160];
                     std::snprintf(text, sizeof(text), "%llu frames %.1f fps %.1f%% over 25 ms, game speed %.2f",
@@ -452,15 +506,15 @@ namespace
                                   m.frames ? 100.0 * m.over25 / m.frames : 0.0, m.ms > 0 ? 20.0 * m.fields / m.ms : 0.0);
                     return std::string(text);
                 };
-                std::fprintf(stderr, "[tmb:holdab] last 1000 frames, hold on: %s | off: %s | vblanks held %llu\n",
-                             describe(g_holdAbModes[1]).c_str(), describe(g_holdAbModes[0]).c_str(),
+                std::fprintf(stderr, "[tmb:ab] last 1000 frames, %s on: %s | off: %s | vblanks held %llu\n",
+                             abExperimentName(g_ab), describe(g_abModes[1]).c_str(), describe(g_abModes[0]).c_str(),
                              static_cast<unsigned long long>(runtime->eeScheduler().vblanksHeld()));
-                g_holdAbModes[0] = g_holdAbModes[1] = HoldAbMode{};
+                g_abModes[0] = g_abModes[1] = AbMode{};
             }
         }
         s_last = now;
         s_lastTick = tick;
-        g_vblankHoldNow = g_vblankHoldMode == 1 || (g_vblankHoldMode == 2 && (tick / 100u) % 2u == 1u);
+        applyAbExperiment(runtime, (tick / 100u) % 2u == 1u);
     }
 
     void noteLagAbFrame(PS2Runtime *runtime, uint64_t vblanks)
@@ -798,6 +852,40 @@ namespace
             const char *value = std::getenv("TMB_PLAYER_HEALTH_CAP");
             return value && *value ? static_cast<float>(std::atof(value)) : -1.0f;
         }();
+        // TMB_ENEMY_HEALTH_CAP=<x> (testing): the same for the vehicles after the player's in the vehicle array
+        // (0x2200 bytes each, assumed contiguous; the log shows each one's health and maximum to check it), so a
+        // scripted run can kill its way through story mode.
+        static const float s_enemyCap = []
+        {
+            const char *value = std::getenv("TMB_ENEMY_HEALTH_CAP");
+            return value && *value ? static_cast<float>(std::atof(value)) : -1.0f;
+        }();
+        if (s_enemyCap >= 0.0f)
+        {
+            static uint32_t s_enemyFrames = 0;
+            const bool log = ++s_enemyFrames % 500u == 0u;
+            std::string line;
+            for (uint32_t index = 1; index < 10; ++index)
+            {
+                const uint32_t vehicle = 0x00259C70u + index * 0x2200u;
+                float health = 0.0f, maximum = 0.0f;
+                std::memcpy(&health, rdram + vehicle + 1012u, 4);
+                std::memcpy(&maximum, rdram + vehicle + 1008u, 4);
+                if (log)
+                {
+                    char text[48];
+                    std::snprintf(text, sizeof(text), " %u:%.0f/%.0f", index, health, maximum);
+                    line += text;
+                }
+                if (maximum > 0.0f && maximum < 10000.0f && health > s_enemyCap)
+                {
+                    health = s_enemyCap;
+                    std::memcpy(rdram + vehicle + 1012u, &health, 4);
+                }
+            }
+            if (log)
+                std::fprintf(stderr, "[tmb:enemies]%s\n", line.c_str());
+        }
         if (s_healthCap >= 0.0f)
         {
             float health = 0.0f, maximum = 0.0f;
@@ -1137,9 +1225,21 @@ namespace
             const int holdMs = hold && *hold ? std::atoi(hold) : 6;
             if (holdMs > 0)
             {
-                g_vblankHoldMode = std::getenv("TMB_VBLANK_HOLD_AB") ? 2 : 1;
+                g_vblankHoldConfigured = g_vblankHoldNow = true;
                 runtime.eeScheduler().setVBlankHoldLimit(std::chrono::microseconds(holdMs * 1000));
             }
+            const std::string ab = std::getenv("TMB_AB") ? std::getenv("TMB_AB") : "";
+            if (ab == "hold" || std::getenv("TMB_VBLANK_HOLD_AB"))
+                g_ab = AbExperiment::Hold;
+            else if (ab == "slice" || std::getenv("TMB_SLICE_AB"))
+                g_ab = AbExperiment::Slice;
+            else if (ab == "lag")
+            {
+                g_ab = AbExperiment::Lag;
+                g_gsLag = true; // updateGsLag then switches it with the experiment
+            }
+            else if (ab == "holdlimit")
+                g_ab = AbExperiment::HoldLimit;
         }
         if (const char *idle = std::getenv("TMB_TRACE_IDLE"); idle && *idle == '1')
         {
