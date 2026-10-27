@@ -407,6 +407,62 @@ namespace
         g_rainAbModes[0] = g_rainAbModes[1] = RainAbMode{};
     }
 
+    // TMB_VBLANK_HOLD=<ms>: in the match, the vblank waits (fork, EeScheduler::setVBlankHold) while a frame is still
+    // being processed, from TheGame::Update to the end of its real-time processing, at most <ms>: a frame that
+    // overruns its field by a few ms then takes those ms instead of a second field (40 ms). The game counts one field
+    // for it, so it runs that much slower in that frame instead of stuttering. TMB_VBLANK_HOLD_AB=1 switches it off
+    // and on every 100 vblanks; per mode, every 1000 frames: frames per second of real time, frames over 25 ms, and
+    // the game's speed (fields of 20 ms against real time).
+    bool g_vblankHoldNow = false;
+    int g_vblankHoldMode = 0; // 0 off, 1 on, 2 alternating
+    struct HoldAbMode
+    {
+        uint64_t frames = 0, over25 = 0, fields = 0;
+        double ms = 0;
+    };
+    HoldAbMode g_holdAbModes[2]; // hold off, on
+
+    void noteVblankHoldFrame(PS2Runtime *runtime)
+    {
+        runtime->eeScheduler().setVBlankHold(false);
+        if (g_vblankHoldMode == 0)
+            return;
+        static std::chrono::steady_clock::time_point s_last{};
+        static uint64_t s_lastTick = 0, s_total = 0;
+        const auto now = std::chrono::steady_clock::now();
+        const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+        if (s_last != std::chrono::steady_clock::time_point{} && g_lastUpdateTick > s_lastTick)
+        {
+            const double ms = std::chrono::duration<double, std::milli>(now - s_last).count();
+            HoldAbMode &mode = g_holdAbModes[g_vblankHoldNow ? 1 : 0];
+            if (ms < 200.0)
+            {
+                ++mode.frames;
+                mode.ms += ms;
+                mode.over25 += ms > 25.0 ? 1u : 0u;
+                mode.fields += tick - s_lastTick;
+            }
+            if (g_vblankHoldMode == 2 && ++s_total % 1000u == 0u)
+            {
+                const auto describe = [](const HoldAbMode &m)
+                {
+                    char text[160];
+                    std::snprintf(text, sizeof(text), "%llu frames %.1f fps %.1f%% over 25 ms, game speed %.2f",
+                                  static_cast<unsigned long long>(m.frames), m.ms > 0 ? 1000.0 * m.frames / m.ms : 0.0,
+                                  m.frames ? 100.0 * m.over25 / m.frames : 0.0, m.ms > 0 ? 20.0 * m.fields / m.ms : 0.0);
+                    return std::string(text);
+                };
+                std::fprintf(stderr, "[tmb:holdab] last 1000 frames, hold on: %s | off: %s | vblanks held %llu\n",
+                             describe(g_holdAbModes[1]).c_str(), describe(g_holdAbModes[0]).c_str(),
+                             static_cast<unsigned long long>(runtime->eeScheduler().vblanksHeld()));
+                g_holdAbModes[0] = g_holdAbModes[1] = HoldAbMode{};
+            }
+        }
+        s_last = now;
+        s_lastTick = tick;
+        g_vblankHoldNow = g_vblankHoldMode == 1 || (g_vblankHoldMode == 2 && (tick / 100u) % 2u == 1u);
+    }
+
     void noteLagAbFrame(PS2Runtime *runtime, uint64_t vblanks)
     {
         if (!g_gsLagAb || vblanks == 0u || vblanks > 10u)
@@ -733,6 +789,7 @@ namespace
         g_runtime = runtime;
         timelineEvent('E');
         runtime->noteGameFrame(); // the fps overlay
+        noteVblankHoldFrame(runtime); // TMB_VBLANK_HOLD: the frame's processing is done
         // TMB_PLAYER_HEALTH_CAP=<x> (testing): the player car's health (vehicle 0x259c70, float at +1012; +1008 is
         // what gameCheckPlayerHealth sets it to) held at most x, so a few hits end a life: the game-over
         // screens within minutes of play.
@@ -975,6 +1032,8 @@ namespace
             g_frameUpdate = std::chrono::steady_clock::now();
         if (s.steps == 0)
             g_lastUpdateTick = runtime->eeScheduler().currentVSyncTick();
+        if (s.steps == 0 && g_vblankHoldNow)
+            runtime->eeScheduler().setVBlankHold(true); // until the end of this frame's processing
         s.gp = getRegU32(ctx, 28);
         const int32_t fields = *gpGlobal(rdram, kFieldsLastFrameGpOffset);
         const int32_t steps = std::min(fields, g_maxSubsteps);
@@ -1072,6 +1131,15 @@ namespace
             g_gsLag = lag && *lag == '1';
             g_gsLagAb = std::getenv("TMB_GS_LAG_AB") != nullptr;
             g_rainAb = std::getenv("TMB_RAIN_LIFT_AB") != nullptr;
+            // On by default with 6 ms (in-run A/B in busy stretches: ~+3 fps, frames over 25 ms 1.5-8% against 6-13%,
+            // the game at 0.99 of its speed); TMB_VBLANK_HOLD=0 turns it off.
+            const char *hold = std::getenv("TMB_VBLANK_HOLD");
+            const int holdMs = hold && *hold ? std::atoi(hold) : 6;
+            if (holdMs > 0)
+            {
+                g_vblankHoldMode = std::getenv("TMB_VBLANK_HOLD_AB") ? 2 : 1;
+                runtime.eeScheduler().setVBlankHoldLimit(std::chrono::microseconds(holdMs * 1000));
+            }
         }
         if (const char *idle = std::getenv("TMB_TRACE_IDLE"); idle && *idle == '1')
         {

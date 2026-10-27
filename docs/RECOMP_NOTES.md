@@ -802,3 +802,22 @@ Most games froze after a few minutes of play (cars standing still rarely did): t
 - `timer1Handler` pacing (T0 COUNT read + up to 16 `sceGsSyncV` catch-ups per frame) to be checked against the
   real frame rate once there is motion on screen.
 - USBD/LGDEV: a proper fix would be OHCI emulation in `ps2xIOP`.
+
+## Slow frames: the vblank held while a frame finishes (2026-10-27)
+Why the threads idle in slow frames (120 s timeline of the match, `tools/timeline.py`): after the end of a
+frame's processing (E) the game waits for the next vblank (B), and only then updates, kicks `hier`, and VIF1 and
+the GS draw; all three idle until B. A frame whose work after B takes 21 ms ends just after the next vblank, and
+the game waits a whole second field: 40 ms (the 35-42 ms cluster of the frame-time histogram). The idle time in
+slow frames is that wait, not a thread starved by another.
+- Fork: `EeScheduler::setVBlankHold` (variable refresh): while held, a VBlankStart that falls due waits in 250 us
+  steps until released or the hold limit has passed. Released in time, the next field counts from when it fired;
+  past the limit it fires with its original time and the fields keep their timeline (a first version re-anchored
+  there too, which turned a 30 ms frame into 46).
+- TMB holds it from TheGame::Update to the end of the frame's real-time processing (in the match only), limit 6 ms
+  (`TMB_VBLANK_HOLD=<ms>`, default 6, 0 off). A frame that overruns by up to 6 ms takes that much longer instead of
+  a second field; the game counts one field for it, so it runs that much slower in that frame (0.99 of its speed
+  overall in busy stretches) instead of stuttering at 25 fps.
+- In-run A/B (`TMB_VBLANK_HOLD_AB=1`, off and on every 100 vblanks; per mode real-time fps, frames over 25 ms, game
+  speed), quiet machine, busy stretches: 49.1 / 47.5 / 49.7 / 47.9 fps on against 45.7 / 44.8 / 46.2 / 47.1 off,
+  frames over 25 ms 3.2 / 7.8 / 1.5 / 7.7% against 11.9 / 13.0 / 9.7 / 6.4%; calm stretches equal (50.0). No sound
+  stall. A run on a loaded machine (another session's builds: 14-29 fps both ways) still had it ahead or equal.
