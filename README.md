@@ -8,7 +8,7 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
 ![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-17a35b)
-![Status](https://img.shields.io/badge/status-not%20playable%20yet-d01f3c)
+![Status](https://img.shields.io/badge/status-first%20match%20playable-e08a00)
 
 </div>
 
@@ -24,10 +24,18 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 Picking the work up elsewhere: [`docs/HANDOFF.md`](docs/HANDOFF.md) (state, how to measure, next steps).
 
-**Work in progress, not playable yet.** The game boots, runs its own IOP modules, shows the PAL language selection,
-plays the movies with their sound, goes through the menus and level loading, and runs the first match (cars, arena,
-HUD, bots, music and effects) at about 40 frames per second on a Ryzen 7 7800X3D with the GPU renderer, short of the
-PAL 50, bound by the VU1 microcode. Full speed, controls in the match and saving are being worked on.
+**Work in progress: the first match is playable.** The game boots, runs its own IOP modules, shows the PAL language
+selection, plays the movies with their sound, goes through the menus and level loading, and runs the first match:
+driving, weapons, bots, HUD, music and effects, deaths, respawns and the game-over menu. It runs at about 45 frames
+per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the busiest moments), short of the PAL
+50; the other arenas, story mode and saving are not checked yet.
+
+<p align="center">
+  <img src="docs/screenshots/match_objective.jpg" width="49%" alt="The first match: an objective on screen and a car exploding">
+  <img src="docs/screenshots/match_rain.jpg" width="49%" alt="The player's car in the rain">
+  <img src="docs/screenshots/intro_movie.jpg" width="49%" alt="The intro movie">
+  <img src="docs/screenshots/game_over.jpg" width="49%" alt="The game-over menu">
+</p>
 
 | Milestone | |
 |---|:---:|
@@ -41,6 +49,7 @@ PAL 50, bound by the VU1 microcode. Full speed, controls in the match and saving
 | Memory card | ⏳ |
 | Menus, level select, level loading | ✅ |
 | First match: HUD, cars, textured 3D, bots | ✅ |
+| Deaths, respawns, game over and replay | ✅ |
 | Full speed (50 fps) | 🔧 |
 | Sound and music (989SND, movie audio) | ✅ |
 | Story mode, saving, split screen | ⏳ |
