@@ -668,12 +668,20 @@ namespace tmb::native
                 for (int k = 0; k < 4; ++k)
                     out[k] = m[0][k] * (q[0] + offset[0]) + m[1][k] * (q[1] + offset[1]) + m[2][k] * (q[2] + offset[2]) + m[3][k];
             };
+            // C = VU 16-19: the texture coordinates, written as ST = (x / w, y / w, z), so the texel is at
+            // (x / w / z, y / w / z) (z is 1 in TMB's matrices).
+            float c3[4][4];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    c3[j][k] = vu.f(16 + j, k);
+            const float zero[3] = {0.0f, 0.0f, 0.0f};
             const uint32_t drops = std::min(vu.w(20, 3), 65536u);
             for (uint32_t n = 0; n < drops; ++n)
             {
-                float h[4], t[4];
+                float h[4], t[4], st[4];
                 transform(a, p, head, h);
                 transform(b, p, tail, t);
+                transform(c3, p, zero, st); // the line's texture coordinates (one ST for both ends)
                 for (int k = 0; k < 3; ++k)
                 {
                     p[k] = next[k];
@@ -701,12 +709,26 @@ namespace tmb::native
                     quad[i].x = corner[i][0];
                     quad[i].y = corner[i][1];
                     quad[i].z = corner[i][2];
+                    const float w = std::max(st[3], 0.0f), q = st[2] != 0.0f ? st[2] : 1.0f;
+                    quad[i].u = w > 0.0f ? st[0] / w / q : 0.0f;
+                    quad[i].v = w > 0.0f ? st[1] / w / q : 0.0f;
                     quad[i].rgba = 0x00808080u | ((i < 2 ? static_cast<uint32_t>(alpha) : 1u) << 24);
                 }
                 const int order[6] = {0, 1, 2, 1, 2, 3};
                 for (int i : order)
                     triangles.push_back(quad[i]);
             }
+            // TMB_NATIVE_LOG_RAIN=1: the rain's texture, blend and drawn drops, once a match is under way.
+            static const bool s_logRain = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_LOG_RAIN");
+                return value && *value == '1';
+            }();
+            static uint32_t s_rainFrames = 0;
+            if (s_logRain && ++s_rainFrames % 500u == 0u)
+                std::fprintf(stderr, "[tmb:native] rain: tex0 %#llx alpha %#llx, %zu vertices, VU 16 (%.3f %.3f %.3f %.3f) VU 19 (%.3f %.3f %.3f %.3f)\n",
+                             static_cast<unsigned long long>(s.tex0), static_cast<unsigned long long>(s.batchAlpha), triangles.size(),
+                             vu.f(16, 0), vu.f(16, 1), vu.f(16, 2), vu.f(16, 3), vu.f(19, 0), vu.f(19, 1), vu.f(19, 2), vu.f(19, 3));
             flush(s, triangles);
             s.mode = Mode::None;
         }
