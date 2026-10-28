@@ -1,0 +1,483 @@
+// Native PC rendering, TMB's adapter (docs/RECOMP_NOTES.md "Native PC port"): TMB's 3D objects read from the game's
+// own data and drawn by the fork's native renderer (ps2x::native::Renderer), without running VU1 code.
+//
+// Each frame `hier` builds a VIF1 DMA chain of its objects and kicks it with hierFlushObjQ. Per object the chain
+// uploads its matrix (VU 0-3), lights (6-8, and 165-175 for the point-light mode), material (150-152: the A+D block
+// with TEX0), texture offset and colour scale (4-5), then starts a setup microprogram (its entry picks the shading
+// mode), its vertex pool (count at 180, positions from 181), the vertex pass, and one MSCNT per strip (a GIF tag and
+// three quadwords per vertex: normal, colour, texture coordinates). The camera and lights common to the frame are a
+// packet the game keeps at 0x2348c0 (VU 9-26). This reads the chain as VIF1 would hand it over and turns each strip
+// into triangles with the formulas the microprograms compute (tools/tmb_mesh_decode.py checks them against VU1).
+//
+// TMB_NATIVE=1 turns it on (the GS still draws its own frame under it; PS2X_NATIVE_VIEW=only shows the native one).
+
+#include "ps2_runtime.h"
+#include "runtime/native/native_renderer.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+namespace tmb::native
+{
+    namespace
+    {
+        constexpr uint32_t kRamMask = 0x1FFFFFFu;
+        constexpr uint32_t kFramePacket = 0x002348C0u;    // STCYCL + UNPACKs of VU 9-26, refreshed every frame
+        constexpr uint32_t kObjectQueue = 0x004C39E0u;    // hierFlushObjQ's chain addresses
+        constexpr uint32_t kObjectQueueIndex = 0x004C39ECu;
+
+        enum class Mode
+        {
+            None,
+            Unlit,
+            Scaled,
+            Directional,
+            Point,
+        };
+
+        Mode modeForSetup(uint32_t pc)
+        {
+            switch (pc)
+            {
+            case 0x0cc8: return Mode::Unlit;
+            case 0x0d08: return Mode::Scaled;
+            case 0x0ce8: return Mode::Directional;
+            case 0x1700: return Mode::Point;
+            default: return Mode::None; // other programs (particles, shadows at 0x3000..): not native yet
+            }
+        }
+
+        // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
+        struct VuImage
+        {
+            uint32_t words[1024 * 4] = {};
+            float f(uint32_t qw, int lane) const
+            {
+                float v;
+                std::memcpy(&v, &words[(qw & 0x3ffu) * 4 + lane], 4);
+                return v;
+            }
+            uint32_t w(uint32_t qw, int lane) const { return words[(qw & 0x3ffu) * 4 + lane]; }
+        };
+
+        struct State
+        {
+            VuImage vu;
+            uint32_t cl = 1, wl = 1;   // STCYCL
+            uint32_t base = 0, offset = 0, tops = 0, top = 0;
+            Mode mode = Mode::None;
+            float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
+            std::vector<float> pool;   // x, y, z per pool vertex (the object's space)
+            uint64_t tex0 = 0;
+            bool haveTexture = false;
+            bool blended = false; // the strip's PRIM.ABE
+        };
+
+        struct Stats
+        {
+            uint64_t chains = 0, objects = 0, strips = 0, triangles = 0, textured = 0, skipped = 0;
+        } g_stats;
+
+        uint32_t readWord(const uint8_t *rdram, uint32_t addr)
+        {
+            uint32_t v;
+            std::memcpy(&v, rdram + (addr & kRamMask), 4);
+            return v;
+        }
+
+        int32_t signExtend(uint32_t value, uint32_t bits)
+        {
+            const uint32_t shift = 32u - bits;
+            return static_cast<int32_t>(value << shift) >> shift;
+        }
+
+        // UNPACK: num vectors of (vn + 1) components of vl bits, written every CL quadwords in groups of WL.
+        void unpack(State &s, uint32_t cmd, uint32_t num, uint32_t imm, const uint32_t *data, size_t dataWords)
+        {
+            const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u;
+            const bool usn = (imm >> 14) & 1u;
+            uint32_t addr = imm & 0x3ffu;
+            if ((imm >> 15) & 1u)
+                addr += s.tops;
+            const uint32_t n = num ? num : 256u;
+            const uint32_t components = vn + 1u;
+            const uint32_t bits = vl == 0 ? 32u : vl == 1 ? 16u : vl == 2 ? 8u : 5u;
+            const uint8_t *bytes = reinterpret_cast<const uint8_t *>(data);
+            const size_t available = dataWords * 4u;
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                const uint32_t qw = s.cl >= s.wl ? addr + (i / s.wl) * s.cl + (i % s.wl) : addr + i;
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if (vl == 3u) // V4-5: one 16-bit word, 5:5:5:1
+                    {
+                        if ((i * 2u + 2u) > available)
+                            return;
+                        const uint32_t v = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+                        const uint32_t field = c < 3u ? ((v >> (5u * c)) & 0x1fu) << 3 : ((v >> 15) & 1u) << 7;
+                        s.vu.words[(qw & 0x3ffu) * 4 + c] = field;
+                        continue;
+                    }
+                    if (c >= components)
+                        continue; // V2 / V3: the lanes above are left (or masked by the game: TMB reads x, y only)
+                    const size_t bit = (static_cast<size_t>(i) * components + c) * bits;
+                    if ((bit + bits) / 8u > available)
+                        return;
+                    uint32_t raw = 0;
+                    if (bits == 32u)
+                        std::memcpy(&raw, bytes + bit / 8u, 4);
+                    else if (bits == 16u)
+                        raw = bytes[bit / 8u] | (bytes[bit / 8u + 1] << 8);
+                    else
+                        raw = bytes[bit / 8u];
+                    s.vu.words[(qw & 0x3ffu) * 4 + c] = (bits == 32u || usn) ? raw : static_cast<uint32_t>(signExtend(raw, bits));
+                }
+                if (vn == 0u && vl != 3u) // S-xx fills all four lanes with the one value
+                    for (uint32_t c = 1; c < 4u; ++c)
+                        s.vu.words[(qw & 0x3ffu) * 4 + c] = s.vu.words[(qw & 0x3ffu) * 4];
+            }
+        }
+
+        uint32_t clampByte(float v)
+        {
+            if (!(v > 0.0f))
+                return 0u;
+            return v >= 255.0f ? 255u : static_cast<uint32_t>(v);
+        }
+
+        // The colour a strip's microprogram writes for one vertex (tools/tmb_mesh_decode.py, Strip.shade).
+        uint32_t shade(const State &s, const uint32_t normal[3], const uint32_t rgba[4], const float *pos)
+        {
+            const VuImage &vu = s.vu;
+            float c[4];
+            if (s.mode == Mode::Unlit)
+                for (int k = 0; k < 4; ++k)
+                    c[k] = static_cast<float>(rgba[k]) + vu.f(20, k);
+            else if (s.mode == Mode::Scaled)
+                for (int k = 0; k < 4; ++k)
+                    c[k] = static_cast<float>(rgba[k]) * vu.f(5, k) + vu.f(20, k);
+            else if (s.mode == Mode::Directional)
+            {
+                float n[3], d[3];
+                for (int k = 0; k < 3; ++k)
+                    n[k] = 1.0f - static_cast<float>(normal[k] & 0xffu) / 128.0f;
+                for (int i = 0; i < 3; ++i)
+                    d[i] = std::max(0.0f, vu.f(6, i) * n[0] + vu.f(7, i) * n[1] + vu.f(8, i) * n[2]);
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float light = (vu.f(17, k) * d[0] + vu.f(18, k) * d[1] + vu.f(19, k) * d[2]) * vu.f(5, k);
+                    c[k] = static_cast<float>(rgba[k]) * light + vu.f(20, k);
+                }
+                c[3] = static_cast<float>(rgba[3]) * vu.f(5, 3) + vu.f(20, 3);
+            }
+            else // point lights
+            {
+                float n[3];
+                for (int k = 0; k < 3; ++k)
+                    n[k] = static_cast<float>(normal[k] & 0xffu) / 127.0f - 128.0f / 127.0f;
+                for (int k = 0; k < 4; ++k)
+                    c[k] = static_cast<float>(rgba[k]) * vu.f(5, k) + vu.f(20, k);
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float d[3] = {-(vu.f(169, i) + pos[0]), -(vu.f(170, i) + pos[1]), -(vu.f(171, i) + pos[2])};
+                    const float d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                    if (d2 <= 0.0f)
+                        continue;
+                    const float inv = 1.0f / std::sqrt(d2);
+                    const float facing = std::max(0.0f, (d[0] * n[0] + d[1] * n[1] + d[2] * n[2]) * inv);
+                    const float att = std::min(0.5f, facing * inv * inv * vu.f(175, i));
+                    float cone = std::max(0.0f, (d[0] * vu.f(165, i) + d[1] * vu.f(166, i) + d[2] * vu.f(167, i)) * inv + vu.f(168, i));
+                    cone *= cone;
+                    cone *= cone;
+                    for (int k = 0; k < 3; ++k)
+                        c[k] += vu.f(172 + i, k) * att * cone;
+                }
+            }
+            return clampByte(c[0]) | (clampByte(c[1]) << 8) | (clampByte(c[2]) << 16) | (clampByte(c[3]) << 24);
+        }
+
+        void setup(State &s, uint32_t pc)
+        {
+            s.mode = modeForSetup(pc);
+            ++g_stats.objects;
+            g_stats.skipped += s.mode == Mode::None ? 1u : 0u;
+            // M = camera (VU 9-12) x object (VU 0-3): column j of M is camera applied to column j of the object's.
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    s.matrix[j * 4 + k] = s.vu.f(9, k) * s.vu.f(j, 0) + s.vu.f(10, k) * s.vu.f(j, 1) +
+                                          s.vu.f(11, k) * s.vu.f(j, 2) + s.vu.f(12, k) * s.vu.f(j, 3);
+            s.haveTexture = false;
+        }
+
+        void vertexPass(State &s)
+        {
+            const uint32_t count = s.vu.w(180, 3) & 0xffffu;
+            s.pool.resize(static_cast<size_t>(count) * 3u);
+            for (uint32_t i = 0; i < count; ++i)
+                for (int k = 0; k < 3; ++k)
+                    s.pool[i * 3u + k] = s.vu.f(181 + i, k);
+        }
+
+        void flush(State &s, std::vector<ps2x::native::Vertex> &triangles);
+
+        void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            if (s.mode == Mode::None)
+                return;
+            ++g_stats.strips;
+            const uint32_t top = s.top;
+            const uint32_t tag0 = s.vu.w(top, 0), tag1 = s.vu.w(top, 1), tag2 = s.vu.w(top, 2);
+            if (tag2 != 0x412u)
+                return; // not an STQ / RGBAQ / XYZF2 strip
+            // The strip's material: its texture (an A+D block at 149 + header, TEX0 among it, when it brings one) and
+            // whether it blends (PRIM.ABE in the GIF tag). A new material ends the batch so far.
+            uint64_t tex0 = s.tex0;
+            bool textured = s.haveTexture;
+            const uint32_t header = s.vu.w(top, 3);
+            if (header != 0u)
+                for (uint32_t q = 0; q < 3u; ++q)
+                {
+                    const uint32_t qw = 149u + header + q;
+                    if ((s.vu.w(qw, 2) & 0xffu) == 0x06u) // TEX0_1
+                    {
+                        tex0 = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
+                        textured = true;
+                    }
+                }
+            const bool blended = ((tag1 >> 15) & 0x40u) != 0u;
+            if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended)
+            {
+                flush(s, triangles);
+                s.tex0 = tex0;
+                s.haveTexture = textured;
+                s.blended = blended;
+            }
+            const uint32_t nloop = tag0 & 0x7fffu;
+            const float uOffset = s.vu.f(4, 0), vOffset = s.vu.f(4, 1);
+            std::vector<ps2x::native::Vertex> strip;
+            strip.reserve(nloop);
+            for (uint32_t v = 0; v < nloop; ++v)
+            {
+                const uint32_t q = top + 1u + 3u * v;
+                const uint32_t index = s.vu.w(q, 3) & 0x7fffu;
+                ps2x::native::Vertex out;
+                if (static_cast<size_t>(index) * 3u + 2u >= s.pool.size())
+                {
+                    strip.push_back(out); // marks a break: no triangle uses it (below)
+                    strip.back().rgba = 0xdeadu;
+                    continue;
+                }
+                const float *pos = &s.pool[index * 3u];
+                out.x = pos[0];
+                out.y = pos[1];
+                out.z = pos[2];
+                const uint32_t normal[3] = {s.vu.w(q, 0), s.vu.w(q, 1), s.vu.w(q, 2)};
+                const uint32_t rgba[4] = {s.vu.w(q + 1, 0), s.vu.w(q + 1, 1), s.vu.w(q + 1, 2), s.vu.w(q + 1, 3)};
+                out.rgba = shade(s, normal, rgba, pos);
+                out.u = static_cast<float>(static_cast<int32_t>(s.vu.w(q + 2, 0))) / 4096.0f + uOffset;
+                out.v = static_cast<float>(static_cast<int32_t>(s.vu.w(q + 2, 1))) / 4096.0f + vOffset;
+                strip.push_back(out);
+            }
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                if (strip[i].rgba == 0xdeadu || strip[i - 1].rgba == 0xdeadu || strip[i - 2].rgba == 0xdeadu)
+                    continue;
+                triangles.push_back(strip[i - 2]);
+                triangles.push_back(strip[i - 1]);
+                triangles.push_back(strip[i]);
+            }
+        }
+
+        void flush(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            if (triangles.empty())
+                return;
+            g_stats.triangles += triangles.size() / 3u;
+            g_stats.textured += s.haveTexture ? 1u : 0u;
+            ps2x::native::Material material;
+            material.textured = s.haveTexture;
+            material.tex0 = s.tex0;
+            material.blend = s.blended ? ps2x::native::Material::Blend::Alpha : ps2x::native::Material::Blend::Opaque;
+            ps2x::native::Renderer::instance().draw(material, s.matrix, triangles.data(), static_cast<uint32_t>(triangles.size()));
+            triangles.clear();
+        }
+
+        // The chain's VIF stream: per tag, its two VIF codes then its data (tag transfer on).
+        void readChain(const uint8_t *rdram, uint32_t addr, std::vector<uint32_t> &words)
+        {
+            uint32_t stack[2] = {};
+            int depth = 0;
+            for (int guard = 0; guard < 100000; ++guard)
+            {
+                const uint32_t a = addr & kRamMask;
+                uint64_t lo, hi;
+                std::memcpy(&lo, rdram + a, 8);
+                std::memcpy(&hi, rdram + a + 8, 8);
+                const uint32_t qwc = lo & 0xffffu, id = (lo >> 28) & 7u, ref = (lo >> 32) & 0x7fffffffu;
+                words.push_back(static_cast<uint32_t>(hi));
+                words.push_back(static_cast<uint32_t>(hi >> 32));
+                const uint32_t dataAddr = (id == 0 || id == 3 || id == 4) ? ref : a + 16u;
+                const size_t start = words.size();
+                words.resize(start + qwc * 4u);
+                std::memcpy(words.data() + start, rdram + (dataAddr & kRamMask), qwc * 16u);
+                const uint32_t next = (id == 0 || id == 3 || id == 4) ? a + 16u : a + 16u + qwc * 16u;
+                if (id == 0 || id == 7)
+                    return;
+                if (id == 1 || id == 3 || id == 4)
+                    addr = next;
+                else if (id == 2)
+                    addr = ref;
+                else if (id == 5)
+                {
+                    if (depth < 2)
+                        stack[depth++] = next;
+                    addr = ref;
+                }
+                else if (id == 6)
+                {
+                    if (depth == 0)
+                        return;
+                    addr = stack[--depth];
+                }
+                else
+                    return;
+            }
+        }
+
+        void runVif(State &s, const std::vector<uint32_t> &words)
+        {
+            std::vector<ps2x::native::Vertex> triangles;
+            size_t i = 0;
+            while (i < words.size())
+            {
+                const uint32_t code = words[i++];
+                const uint32_t cmd = (code >> 24) & 0x7fu, num = (code >> 16) & 0xffu, imm = code & 0xffffu;
+                if ((cmd & 0x60u) == 0x60u)
+                {
+                    const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u, n = num ? num : 256u;
+                    const uint32_t bits = vl == 3u ? 16u : (vn + 1u) * (vl == 0 ? 32u : vl == 1 ? 16u : 8u);
+                    const size_t size = (static_cast<size_t>(n) * bits + 31u) / 32u;
+                    unpack(s, cmd, num, imm, words.data() + i, std::min(size, words.size() - i));
+                    i += size;
+                    continue;
+                }
+                switch (cmd)
+                {
+                case 0x01: s.cl = imm & 0xffu; s.wl = (imm >> 8) & 0xffu; if (s.wl == 0) s.wl = 1; break;
+                case 0x02: s.offset = imm & 0x3ffu; s.tops = s.base; break;
+                case 0x03: s.base = imm & 0x3ffu; s.tops = s.base; break;
+                case 0x14: // MSCAL
+                case 0x15: // MSCALF
+                case 0x17: // MSCNT
+                {
+                    s.top = s.tops;
+                    s.tops = s.tops == s.base ? s.base + s.offset : s.base;
+                    if (cmd == 0x17)
+                        strip(s, triangles);
+                    else
+                    {
+                        const uint32_t pc = imm * 8u;
+                        if (pc == 0x0000u)
+                            vertexPass(s);
+                        else
+                        {
+                            flush(s, triangles);
+                            setup(s, pc);
+                        }
+                    }
+                    break;
+                }
+                case 0x20: i += 1; break;                                  // STMASK
+                case 0x30: case 0x31: i += 4; break;                       // STROW / STCOL
+                case 0x4a: i += static_cast<size_t>(num ? num : 256u) * 2u; break; // MPG
+                case 0x50: case 0x51: i += static_cast<size_t>(imm ? imm : 65536u) * 4u; break; // DIRECT: the GS front end sees it
+                default: break;
+                }
+            }
+            flush(s, triangles);
+        }
+
+        // TMB draws a 640 x 256 field (it shows each one twice as tall): the screen is 256 lines below 2048 - 128.
+        ps2x::native::Screen screen()
+        {
+            ps2x::native::Screen screen;
+            screen.originY = 2048.0f - 128.0f;
+            screen.height = 256.0f;
+            return screen;
+        }
+
+        State &state()
+        {
+            static State s;
+            return s;
+        }
+    }
+
+    bool enabled()
+    {
+        static const bool on = []
+        {
+            const char *value = std::getenv("TMB_NATIVE");
+            return value && *value == '1';
+        }();
+        return on;
+    }
+
+    // hierFlushObjQ, before it kicks the chain: read the objects it holds.
+    void onFlushObjQ(const uint8_t *rdram)
+    {
+        if (!enabled())
+            return;
+        static bool s_started = false;
+        if (!s_started)
+        {
+            ps2x::native::Renderer::instance().setEnabled(true);
+            ps2x::native::Renderer::instance().beginFrame(screen());
+            s_started = true;
+        }
+        const uint32_t index = readWord(rdram, kObjectQueueIndex);
+        const uint32_t chain = readWord(rdram, kObjectQueue + index * 4u) & 0x7fffffffu;
+        if (chain == 0u)
+            return;
+        State &s = state();
+        // The frame's camera and lights, from the packet at 0x2348c0 the game sends before its objects: each block is
+        // STCYCL and UNPACK (two VIF codes) then its quadwords, so the data starts 8 bytes after the block.
+        auto loadBlock = [&](uint32_t block, uint32_t firstQw, uint32_t qwords)
+        {
+            for (uint32_t q = 0; q < qwords; ++q)
+                for (int k = 0; k < 4; ++k)
+                    s.vu.words[(firstQw + q) * 4 + k] = readWord(rdram, block + 8u + q * 16u + k * 4u);
+        };
+        loadBlock(kFramePacket, 9, 4);            // camera to GS screen
+        loadBlock(kFramePacket + 0x90u, 17, 4);   // light colours (17-19), ambient (20)
+        std::vector<uint32_t> words;
+        readChain(rdram, chain, words);
+        runVif(s, words);
+        ++g_stats.chains;
+    }
+
+    // The end of a frame's real-time processing: publish what was submitted, start the next frame.
+    void onFrameEnd()
+    {
+        if (!enabled())
+            return;
+        ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
+        static uint32_t s_frames = 0;
+        if (++s_frames % 250u == 0u)
+        {
+            const State &s = state();
+            std::fprintf(stderr, "[tmb:native] per 250 frames: %llu chains, %llu objects (%llu not native), %llu strips, %llu triangles, %llu textured batches; matrix col3 (%.1f %.1f %.1f %.1f)\n",
+                         static_cast<unsigned long long>(g_stats.chains), static_cast<unsigned long long>(g_stats.objects),
+                         static_cast<unsigned long long>(g_stats.skipped), static_cast<unsigned long long>(g_stats.strips),
+                         static_cast<unsigned long long>(g_stats.triangles), static_cast<unsigned long long>(g_stats.textured),
+                         s.matrix[12], s.matrix[13], s.matrix[14], s.matrix[15]);
+            g_stats = Stats{};
+        }
+        renderer.endFrame();
+        renderer.beginFrame(screen());
+    }
+}
