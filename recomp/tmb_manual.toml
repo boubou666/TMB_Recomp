@@ -1,0 +1,29 @@
+# Hand-written recompiler settings, shared by both regions: by symbol name, so tools/tmb_manual_toml.py writes them into
+# each region's config (recomp/tmb_scus97101.toml, recomp/tmb_sces50360.toml) with that executable's addresses. The
+# rest of each config is ps2_analyzer's output (scripts/analyze.sh).
+
+# Logitech steering wheel support (LGDEV.IRX). USBD.IRX and LGDEV.IRX fail to start in the IOP emulator (no USB host
+# controller), so RPC server 0x046d never appears and lgDevInit spins forever on sceSifBindRpc. Disable the whole
+# Logitech path until the IOP side exists.
+[[stub]]
+handler = "ret0"
+symbols = [
+  "lgDevInit",
+  "inputLgUpdate__Fv",
+  "inputSetLgSpringOffset__Fii",
+  "inputSetLgSpringEffect__Fiiiii",
+  "inputSetLgCollisionEffect__Fiiii",
+  "inputSetLgSmallActuatorEffect__Fiii",
+  "inputSetLgLargeActuatorEffect__Fiiiiii",
+  "inputStartLgEffect__FiPi",
+  "inputSetLgTurningFriction__Fif",
+]
+
+# Movie player (Sony ezmpeg sample: videoDec/viBuf/audioDec). The runtime's libmpeg HLE decodes video straight from
+# sceMpegDemuxPss* with FFmpeg. videoCallback copies the same M2V packets into the game's IPU ring (viBuf), which only
+# the IPU drains, through mpegNodata -> viBufAddDMA -> DMA ch4, a libmpeg callback the HLE never calls. The ring fills
+# and videoDecFlush spins forever at the end of the first movie (COPYRTE.PSS). The copy is useless with the HLE: accept
+# the packet and drop it.
+[[stub]]
+handler = "ret1"
+symbols = ["videoCallback__FP7sceMpegP16sceMpegCbDataStrPv"]

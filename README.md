@@ -2,7 +2,7 @@
 
 # TMB_Recomp
 
-**A native Linux and Windows port of *Twisted Metal: Black* (PAL, `SCES-50360`): the whole game recompiled to C++ and run on the PC itself.**<br>
+**A native Linux and Windows port of *Twisted Metal: Black* (USA `SCUS-97101` and PAL `SCES-50360`): the whole game recompiled to C++ and run on the PC itself.**<br>
 Not an emulator. The game's MIPS code (EE), its sound driver (IOP) and its VU1 microcode all run as native code; its 3D is
 drawn by a PC renderer from the game's own meshes, matrices and textures, and its sound is mixed on the PC's clock.
 
@@ -15,18 +15,21 @@ drawn by a PC renderer from the game's own meshes, matrices and textures, and it
 
 > [!IMPORTANT]
 > No game files are included: no ELF, IRX modules, data archives, or code generated from them.
-> You need **your own copy** of the PAL release, PS2 ID **`SCES-50360`**. The port is built against that disc's executable:
+> You need **your own copy** of the game: the USA release, PS2 ID **`SCUS-97101`** (the default, the more complete one: the
+> characters' story cinematics after choosing a character; the European disc's are about a tenth of their size), or the European one, **`SCES-50360`**. The port is built against their executables:
 >
-> | File | SHA-1 |
-> |---|---|
-> | `SCES_503.60` | `d097dd85167b6a188bf5ec17ecfc53a1f275a581` |
+> | Release | File | SHA-1 |
+> |---|---|---|
+> | USA | `SCUS_971.01` | `3ff17f4897552e355d0bb8c3abfa5125fe3ff2ef` |
+> | Europe | `SCES_503.60` | `d097dd85167b6a188bf5ec17ecfc53a1f275a581` |
 
 ## Status
 
 Picking the work up elsewhere: [`docs/HANDOFF.md`](docs/HANDOFF.md) (state, how to measure, next steps).
 
-**Playable, at the PAL 50 frames per second, as a native port.** The game boots, runs its own IOP modules, shows the
-PAL language selection, plays the movies with their sound, goes through the menus and level loading, and plays matches
+**Playable, at full speed, as a native port: the USA release at NTSC's 60 frames per second, the European one at PAL's
+50.** The game boots, runs its own IOP modules, shows the PAL language selection (Europe), plays the movies with their
+sound, goes through the menus and level loading, and plays matches
 and story levels: driving, weapons, bots, HUD, music and effects, deaths, respawns, saving and loading. With the native
 path (`scripts/run_native.sh`) a full match runs at 49.2 fps on average (median 49.5, never under 40) on a Ryzen 7
 7800X3D. Still being checked: every arena and story level to the endings, and some effects against the PS2 picture
@@ -44,11 +47,12 @@ path (`scripts/run_native.sh`) a full match runs at 49.2 fps on average (median 
 | Map and recompile the main ELF (3,572 functions, symbols intact) | ✅ |
 | Link the generated code with the PS2Recomp runtime on Linux and Windows | ✅ |
 | Boot: EE kernel, the game's own IOP modules, CD reads from the disc files | ✅ |
+| USA release (SCUS-97101, NTSC 60 Hz) alongside the European one (SCES-50360), one runtime for both | ✅ |
 | Language selection screen (PAL) | ✅ |
 | Controller input | ✅ |
 | Movies (PSS, MPEG-2 decoded with FFmpeg) | ✅ |
 | Title screen and main menu | ✅ |
-| Memory card: save, load, overwrite (`game/mc0`, `game/mc1`) | ✅ |
+| Memory card: save, load, overwrite (`mc0`, `mc1` in the disc folder) | ✅ |
 | Story mode: level 1 of 8 cleared (Junkyard, Midtown Suburbs), progress saved and loaded | ✅ |
 | Menus, level select, level loading | ✅ |
 | First match: HUD, cars, textured 3D, bots | ✅ |
@@ -88,7 +92,7 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 | Menus, 2D, movies | GS, IPU | still on the GS path (paraLLEl-GS on the GPU, or the CPU rasterizer); movies decoded with FFmpeg |
 
 ```
-disc files (game/) ──► ps2_analyzer ──► recomp/tmb_sces50360.toml (SDK stubs, entry points, jump tables)
+disc files (game_us/, game/) ──► ps2_analyzer ──► recomp/tmb_scus97101.toml, tmb_sces50360.toml (+ recomp/tmb_manual.toml)
                                            │
                      ps2_recomp + the ELF's own symbol table ──► C++ (one file per function, generated/)
    989SND, LIBSD as the IOP loads them ──► iop_recomp.py ──► C++ (generated/iop/)
@@ -99,7 +103,14 @@ disc files (game/) ──► ps2_analyzer ──► recomp/tmb_sces50360.toml (S
    what is left of the PS2: EE kernel HLE · DMAC · GIF/GS (2D) · VIF · IPU · IOP kernel and other modules
 ```
 
-- The PAL executable ships with its full symbol table (3,572 named functions, `.mdebug`), so no Ghidra pass is needed:
+- **Both regions, one runtime.** `TMB_REGION=us` (the default) or `pal` picks the disc folder (`game_us/`, `game/`), the
+  recompiler config, the generated code (`generated_us/`, `generated/`) and the build (`build/game_us`, `build/game`).
+  Everything hand-written is shared: `runtime/` is written against the PAL executable and marks the addresses it uses
+  (`TMB_ADDR`, `TMB_GP`); `tools/tmb_region_map.py` maps them to the region's executable by symbol (a file's statics
+  through the code that uses them) into `tmb_region.h`, and `recomp/tmb_manual.toml` holds the recompiler's hand-written
+  settings by symbol name. The two executables differ little (the US one is five months older); NTSC draws a 640 x 224
+  field instead of 640 x 256, which the native renderer follows.
+- Both executables ship their full symbol table (3,572 named functions, `.mdebug`), so no Ghidra pass is needed:
   `ps2_analyzer` reads the symbols, recognises the Sony SDK functions that have runtime handlers and writes the config.
 - PS2Recomp turns every function into C++ and emits the address-indexed function table.
 - `runtime/tmb_native.cpp` is TMB's native adapter: it reads every VIF1 stream the game sends and draws it natively,
@@ -118,14 +129,14 @@ shared with the *Valkyrie Profile 2* and *Drakengard* recompilations. Fixes made
 - X11/Wayland and OpenGL development headers (raylib is fetched and built by the fork)
 - `bsdtar` (libarchive) to extract the disc
 - A CPU with AVX2 (the runtime is built for `x86-64-v3`)
-- Your own copy of `SCES-50360` (check the hash above)
+- Your own copy of `SCUS-97101` or `SCES-50360` (check the hash above)
 
 ## Build and run
 
 ```bash
 git clone --recurse-submodules https://github.com/boubou666/TMB_Recomp.git
 cd TMB_Recomp
-scripts/extract_iso.sh "/path/to/Twisted Metal - Black (Europe).iso"   # disc files -> game/
+scripts/extract_iso.sh "/path/to/Twisted Metal - Black (USA).iso"      # disc files -> game_us/ (TMB_REGION=pal: the European disc -> game/)
 scripts/build_tools.sh                                                  # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
 scripts/recomp.sh                                                       # ELF + recomp/tmb_sces50360.toml -> generated/ (VU1 microcode -> generated/vu1/)
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game
@@ -158,7 +169,7 @@ The runner build compiles about 70 MB of generated C++ and takes a while the fir
 Run the game with the extracted disc folder as `cdrom0:` (that is what `scripts/run.sh` does):
 
 ```bash
-build/game/PS2Recomp/ps2xRuntime/ps2EntryRunner game/SCES_503.60
+build/game_us/PS2Recomp/ps2xRuntime/ps2EntryRunner game_us/SCUS_971.01
 ```
 
 A controller is used when one is connected; otherwise the keyboard (US key positions):
@@ -215,7 +226,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `PS2X_GS_DUMP=<dir>`, `PS2X_GS_DUMP_AFTER=<s>`, `PS2X_GS_DUMP_COUNT=<n>` | Log the next GS primitives with their state, decoded textures and VRAM |
 | `PS2X_GS_SYNC=1` | Rasterize on the game thread instead of the GS worker threads |
 | `PS2X_GS_LOG_LIMIT=<n>` | Raise the cap on the `[gs:gif]`/`[gs:reg]` diagnostic logs |
-| `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: first `.iso` above `game/`) |
+| `TMB_ISO=<path>` | Disc image for raw `sceCdRead` calls (default: the `.iso` above the disc folder that boots the executable) |
 | `TMB_TRACE_MOVIE=1` | Log the movie player's thread teardown, audio state and MPEG HLE summary |
 | `TMB_TRACE_THREADS=<s>` | Every few seconds: guest threads, MPEG HLE state, GS display registers (`TMB_TRACE_IOP=1` adds IOP threads) |
 | `PS2X_IOP_TRACE_RPC=1` | Log IOP RPC dispatch and blocking calls |
@@ -226,8 +237,8 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 
 | | |
 |---|---|
-| Boot ELF | `SCES_503.60`, entry `0x100008`, `.text` at `0x100000` (1.2 MB), not stripped |
-| Video mode | PAL |
+| Boot ELF | `SCUS_971.01` (USA, May 2001) / `SCES_503.60` (Europe, October 2001), entry `0x100008`, `.text` at `0x100000` (1.2 MB), not stripped |
+| Video mode | NTSC (USA), PAL (Europe) |
 | IOP modules | `MOD/*.IRX`: 989SND, LGDEV, LIBSD, MCMAN, MCSERV, MTAPMAN, PADMAN, SIO2MAN, SNDBGET, USBD, USBKEYBD, USBMLOAD |
 | IOP image | `IOPRP213.IMG` |
 | Data | `LVL/`, `PCAR/`, `ACAR/`, `PTS/`, `RST/`, `SND/`, `VAG/`, `SHELL/` (per-language UI), `MOV/*.PSS` |
@@ -243,7 +254,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | `docs/` | Bring-up notes |
 | `PS2Recomp/` | PS2Recomp fork (submodule) |
 
-Everything derived from the game (`game/`, `generated/`, `build/`, disc images, captures) is git-ignored. Never commit or
+Everything derived from the game (`game_us/`, `game/`, `generated_us/`, `generated/`, `build/`, disc images, captures) is git-ignored. Never commit or
 redistribute it.
 
 ## Credits

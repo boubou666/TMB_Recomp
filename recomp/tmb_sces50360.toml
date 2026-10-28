@@ -21,10 +21,7 @@ patch_cache = true
 
 # Functions to stub (only names with runtime syscall/stub handlers)
 stubs = [
-  # --- Manual: Logitech steering wheel support (LGDEV.IRX). USBD.IRX and LGDEV.IRX
-  # fail to start in the IOP emulator (no USB host controller), so RPC server
-  # 0x046d never appears and lgDevInit spins forever on sceSifBindRpc. Disable the
-  # whole Logitech path until the IOP side exists.
+  # --- Manual (recomp/tmb_manual.toml, tools/tmb_manual_toml.py)
   "ret0@0x00210B08", # lgDevInit
   "ret0@0x001D8AE0", # inputLgUpdate__Fv
   "ret0@0x001DA580", # inputSetLgSpringOffset__Fii
@@ -34,13 +31,6 @@ stubs = [
   "ret0@0x001DAB78", # inputSetLgLargeActuatorEffect__Fiiiiii
   "ret0@0x001DAD30", # inputStartLgEffect__FiPi
   "ret0@0x001DADA8", # inputSetLgTurningFriction__Fif
-  # --- Manual: movie player (Sony ezmpeg sample: videoDec/viBuf/audioDec).
-  # The runtime's libmpeg HLE decodes video straight from sceMpegDemuxPss* with
-  # FFmpeg. videoCallback copies the same M2V packets into the game's IPU ring
-  # (viBuf), which only the IPU drains, through mpegNodata -> viBufAddDMA ->
-  # DMA ch4, a libmpeg callback the HLE never calls. The ring fills and
-  # videoDecFlush spins forever at the end of the first movie (COPYRTE.PSS).
-  # The copy is useless with the HLE: accept the packet and drop it.
   "ret1@0x001ED4D8", # videoCallback__FP7sceMpegP16sceMpegCbDataStrPv
   # --- Analyzer output below
   "_exit@0x001000B0",

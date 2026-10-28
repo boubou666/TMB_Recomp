@@ -18,6 +18,7 @@
 #include "runtime/native/native_vif1.h"
 #include "runtime/native/native_vu1_sandbox.h"
 #include "runtime/ps2_memory.h"
+#include "tmb_region.h" // TMB_REGION_US / TMB_REGION_PAL
 
 #include <algorithm>
 #include <cmath>
@@ -167,16 +168,17 @@ namespace tmb::native
         // the skipped ones on both sides), whatever changed in between (a match starting, a menu).
         struct Decision
         {
-            uint32_t pc = 0;
+            uint32_t pc = 0;      // an MSCAL's start, or a DIRECT's size in quadwords
             bool skipped = false;
+            bool direct = false;
         };
         std::mutex g_decisionsMutex;
         std::deque<Decision> g_decisions;
 
-        void noteDecision(uint32_t pc, bool skipped)
+        void noteDecision(uint32_t pc, bool skipped, bool direct = false)
         {
             std::lock_guard<std::mutex> lock(g_decisionsMutex);
-            g_decisions.push_back({pc, skipped});
+            g_decisions.push_back({pc, skipped, direct});
             if (g_decisions.size() > 65536u) // nobody takes them (no gate)
                 g_decisions.pop_front();
         }
@@ -189,10 +191,62 @@ namespace tmb::native
             {
                 const Decision decision = g_decisions.front();
                 g_decisions.pop_front();
-                if (decision.pc == startPc)
+                if (!decision.direct && decision.pc == startPc)
                     return decision.skipped;
             }
             return false; // a transfer the adapter did not see: VU1 draws it
+        }
+
+        // The DIRECT packets the adapter drew (the particles): taken in the same queue, in stream order. A DIRECT the
+        // VIF1 interpreter does not ask about (cut, or finishing an image) leaves its entry for drawnNatively to drop.
+        bool directDrawnNatively(uint32_t qwords)
+        {
+            std::lock_guard<std::mutex> lock(g_decisionsMutex);
+            while (!g_decisions.empty() && g_decisions.front().direct)
+            {
+                const Decision decision = g_decisions.front();
+                g_decisions.pop_front();
+                if (decision.pc == qwords)
+                    return decision.skipped;
+            }
+            return false;
+        }
+
+        // A DIRECT packet that only draws (vertex kicks, no image transfer): the particles TMB sends that way.
+        bool drawsOnly(const uint32_t *words, size_t qwords)
+        {
+            bool draws = false;
+            size_t q = 0;
+            while (q < qwords)
+            {
+                const uint64_t lo = words[q * 4] | (static_cast<uint64_t>(words[q * 4 + 1]) << 32);
+                const uint64_t regs = words[q * 4 + 2] | (static_cast<uint64_t>(words[q * 4 + 3]) << 32);
+                ++q;
+                const uint32_t nloop = lo & 0x7fffu, flg = (lo >> 58) & 3u;
+                const uint32_t nreg = ((lo >> 60) & 0xfu) ? static_cast<uint32_t>((lo >> 60) & 0xfu) : 16u;
+                if (flg >= 2u)
+                    return false; // an image transfer: the GS (and the texture cache) must have it
+                for (uint32_t r = 0; r < nreg; ++r)
+                {
+                    const uint32_t reg = (regs >> (4u * r)) & 0xfu;
+                    draws = draws || reg == 0x4u || reg == 0x5u;
+                }
+                if (flg == 0u)
+                {
+                    for (uint32_t i = 0; i < nloop * nreg && q < qwords; ++i, ++q)
+                        if (((regs >> (4u * (i % nreg))) & 0xfu) == 0xeu)
+                        {
+                            const uint32_t address = words[q * 4 + 2] & 0xffu;
+                            if (address == 0x04u || address == 0x05u)
+                                draws = true;
+                            else if (address >= 0x50u && address <= 0x54u)
+                                return false; // a transfer set up (BITBLTBUF, TRXPOS, TRXREG, TRXDIR, HWREG)
+                        }
+                }
+                else
+                    q += (static_cast<size_t>(nloop) * nreg + 1u) / 2u;
+            }
+            return draws;
         }
 
         // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
@@ -214,6 +268,10 @@ namespace tmb::native
             uint32_t cl = 1, wl = 1;   // STCYCL
             uint32_t base = 0, offset = 0, tops = 0, top = 0, itops = 0;
             VIFRegisters vif{}; // STMOD, STMASK, STROW / STCOL (and STCYCL, TOPS) for vifUnpack
+            // Which of them the observed streams set: the others come from VIF1's own registers (TMB sets its mask and
+            // row once, in a transfer before the ones the adapter sees; without them the ribbons' texture coordinates
+            // were wrong in the copy, and their segments with them).
+            bool sawMask = false, sawRow = false, sawCol = false, sawMode = false;
             std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
             uint32_t sandboxSetup = 0;                         // the last setup the sandbox ran (statistics)
             bool setupOnVu1 = false;                           // TMB_NATIVE_VU1_PCS
@@ -326,6 +384,12 @@ namespace tmb::native
                 for (int k = 0; k < 4; ++k)
                     s.matrix[j * 4 + k] = s.vu.f(9, k) * s.vu.f(j, 0) + s.vu.f(10, k) * s.vu.f(j, 1) +
                                           s.vu.f(11, k) * s.vu.f(j, 2) + s.vu.f(12, k) * s.vu.f(j, 3);
+            // The rigid strip programs scale z / w by VU 4.z, the object's depth factor (MULz.z vf24, vf19z at 0x1018,
+            // 0x1188, 0x1460, 0x16c8), as the sprites do (sprite() applies it itself): without it the scenery sat at
+            // another depth than the glows and smoke drawn over it, and cut them. The skinned strips do not scale.
+            if (s.mode == Mode::Unlit || s.mode == Mode::Scaled || s.mode == Mode::Directional || s.mode == Mode::Point)
+                for (int j = 0; j < 4; ++j)
+                    s.matrix[j * 4 + 2] *= s.vu.f(4, 2);
             s.haveTexture = false;
         }
 
@@ -781,6 +845,20 @@ namespace tmb::native
                 ++q;
                 const uint32_t nloop = lo & 0x7fffu, flg = (lo >> 58) & 3u;
                 const uint32_t nreg = ((lo >> 60) & 0xfu) ? static_cast<uint32_t>((lo >> 60) & 0xfu) : 16u;
+                // TMB_NATIVE_LOG_DIRECT_TAGS=1: the kinds of GIF tags DIRECT packets carry (do they draw?).
+                static const bool s_logTags = std::getenv("TMB_NATIVE_LOG_DIRECT_TAGS") != nullptr;
+                if (s_logTags)
+                {
+                    static std::unordered_map<uint64_t, uint64_t> s_kinds;
+                    static uint64_t s_tags = 0;
+                    const uint64_t kind = (regs & 0xffffffffffull) ^ (static_cast<uint64_t>(flg) << 60) ^ (static_cast<uint64_t>(nreg) << 52) ^
+                                          (((lo >> 46) & 1u) ? ((lo >> 47) & 0x7ffu) << 40 : 0u);
+                    s_kinds[kind] += nloop;
+                    if (++s_tags % 5000u == 0u)
+                        for (const auto &[k, loops] : s_kinds)
+                            std::fprintf(stderr, "[tmb:native] direct tag kind %#llx: %llu loops\n", static_cast<unsigned long long>(k),
+                                         static_cast<unsigned long long>(loops));
+                }
                 if (flg == 0u)
                 {
                     for (uint32_t loop = 0; loop < nloop && q < qwords; ++loop)
@@ -833,7 +911,7 @@ namespace tmb::native
                 case 0x02: s.offset = imm & 0x3ffu; s.tops = s.base; break;
                 case 0x03: s.base = imm & 0x3ffu; s.tops = s.base; break;
                 case 0x04: s.itops = imm & 0x3ffu; break; // ITOP
-                case 0x05: s.vif.mode = imm & 3u; break;  // STMOD
+                case 0x05: s.vif.mode = imm & 3u; s.sawMode = true; break; // STMOD
                 case 0x14: // MSCAL
                 case 0x15: // MSCALF
                 case 0x17: // MSCNT
@@ -863,7 +941,8 @@ namespace tmb::native
                         {
                             if (cmd != 0x17)
                                 s_following = imm * 8u == s_mirrorPc;
-                            if (s_following)
+                            static uint32_t s_dumped = 0;
+                            if (s_following && ++s_dumped <= 400u) // the first 400 runs
                             {
                                 const uint32_t header[2] = {cmd == 0x17 ? 0xffffffffu : imm * 8u, s.top};
                                 std::fwrite(header, sizeof(header), 1, s_mirror);
@@ -971,12 +1050,14 @@ namespace tmb::native
                     break;
                 }
                 case 0x20: // STMASK
+                    s.sawMask = true;
                     if (i < count)
                         s.vif.mask = words[i];
                     i += 1;
                     break;
                 case 0x30: // STROW
                 case 0x31: // STCOL
+                    (cmd == 0x30 ? s.sawRow : s.sawCol) = true;
                     if (i + 4u <= count)
                         std::memcpy(cmd == 0x30 ? s.vif.row : s.vif.col, words + i, 16);
                     i += 4;
@@ -992,12 +1073,39 @@ namespace tmb::native
                     i += size;
                     break;
                 }
-                case 0x50: case 0x51: // DIRECT: the GS front end draws it; the adapter notes its registers
+                case 0x50: case 0x51: // DIRECT: drawn here when it only draws (particles), else the GS draws it
                 {
                     const size_t size = static_cast<size_t>(imm ? imm : 65536u) * 4u;
-                    readDirect(s, words + i, std::min(size, count - i) / 4u);
-                    if (s.sandbox)
-                        s.sandbox->gif().registers(reinterpret_cast<const uint8_t *>(words + i), std::min(size, count - i) * 4u);
+                    const size_t have = std::min(size, count - i);
+                    readDirect(s, words + i, have / 4u);
+                    const bool native = s.sandbox && inMatch() && have == size && drawsOnly(words + i, have / 4u);
+                    // TMB_NATIVE_LOG_DIRECT=1: the A+D addresses of some DIRECT packets in a match.
+                    static const bool s_logDirect = std::getenv("TMB_NATIVE_LOG_DIRECT") != nullptr;
+                    static uint32_t s_directLogged = 0;
+                    if (s_logDirect && inMatch() && ++s_directLogged % 200u == 1u && s_directLogged < 20000u)
+                    {
+                        std::string list;
+                        for (size_t q = 1; q < have / 4u && list.size() < 300u; ++q)
+                        {
+                            char item[24];
+                            std::snprintf(item, sizeof(item), " %02x", words[i + q * 4 + 2] & 0xffu);
+                            list += item;
+                        }
+                        std::fprintf(stderr, "[tmb:native] DIRECT %zu qw, tag %08x %08x %08x %08x, native %d, A+D:%s\n", have / 4u, words[i], words[i + 1],
+                                     words[i + 2], words[i + 3], native ? 1 : 0, list.c_str());
+                    }
+                    noteDecision(imm ? imm : 65536u, native, true);
+                    if (native)
+                    {
+                        flush(s, triangles);
+                        ps2x::native::Renderer::instance().beginGroup(++s.group);
+                        ps2x::native::Renderer::instance().setKey(0);
+                        s.sandbox->gif().setSource(0xd1ec7u);
+                        s.sandbox->gif().packet(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
+                        s.sandbox->gif().flush();
+                    }
+                    else if (s.sandbox)
+                        s.sandbox->gif().registers(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
                     i += size;
                     break;
                 }
@@ -1007,12 +1115,18 @@ namespace tmb::native
             flush(s, triangles);
         }
 
-        // TMB draws a 640 x 256 field (it shows each one twice as tall): the screen is 256 lines below 2048 - 128.
+        // TMB draws a 640 x 256 field in PAL, 640 x 224 in NTSC (it shows each one twice as tall): the screen is that
+        // many lines below 2048 - 128 (2048 - 112).
         ps2x::native::Screen screen()
         {
             ps2x::native::Screen screen;
+#if defined(TMB_REGION_US)
+            screen.originY = 2048.0f - 112.0f; // NTSC: a 640 x 224 field
+            screen.height = 224.0f;
+#else
             screen.originY = 2048.0f - 128.0f;
             screen.height = 256.0f;
+#endif
             screen.gsZScale = 16.0f; // the microprograms write Z as FTOI4 of z / w
             return screen;
         }
@@ -1038,7 +1152,19 @@ namespace tmb::native
     {
         void onVif1(const uint8_t *stream, size_t bytes)
         {
-            runVif(state(), reinterpret_cast<const uint32_t *>(stream), bytes / 4u);
+            State &s = state();
+            if (const VIFRegisters *regs = ps2x::native::vif1Registers())
+            {
+                if (!s.sawMask)
+                    s.vif.mask = regs->mask;
+                if (!s.sawRow)
+                    std::memcpy(s.vif.row, regs->row, sizeof(s.vif.row));
+                if (!s.sawCol)
+                    std::memcpy(s.vif.col, regs->col, sizeof(s.vif.col));
+                if (!s.sawMode)
+                    s.vif.mode = regs->mode;
+            }
+            runVif(s, reinterpret_cast<const uint32_t *>(stream), bytes / 4u);
             ++g_stats.chains;
         }
 
@@ -1057,6 +1183,7 @@ namespace tmb::native
             if (sandboxed())
                 state().sandbox = std::make_unique<ps2x::native::Vu1Sandbox>();
             ps2x::native::setVu1Gate(&drawnNatively);
+            ps2x::native::setDirectGate(&directDrawnNatively);
             // In the GS stream where VU1's output would have been (with PS2X_GS_RENDERER=native: particles, the 2D
             // and the other GS draws sort with the 3D); with other GS renderers present() draws over the GS frame.
             ps2x::native::Renderer::instance().setStreamDraws(true);
@@ -1084,6 +1211,70 @@ namespace tmb::native
             renderer.beginFrame(screen());
             state().keysThisFrame.clear();
         }
+    }
+
+    // TMB's lens flares (particleLensFlareTestZbuffer) read the GS Z buffer back around each light (a StoreImage of a
+    // few pixels) to see whether something hides it; the native frame is not in the GS Z buffer, so in a match the
+    // samples are replaced by the native frame's depth there (from the frame presented last).
+    void patchFlareDepth(uint8_t *rdram, uint32_t image, uint32_t dest)
+    {
+        // TMB_NATIVE_FLARE_DEPTH=0: the flares keep the GS's samples (no depth read back from the native frame).
+        static const bool s_on = []
+        {
+            const char *value = std::getenv("TMB_NATIVE_FLARE_DEPTH");
+            return !(value && *value == '0');
+        }();
+        if (!s_on || !enabled() || !inMatch() || !state().sandbox)
+            return;
+        ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
+        renderer.wantDepth();
+        uint64_t bitbltbuf = 0, trxpos = 0, trxreg = 0;
+        for (uint32_t q = 0; q < 7u; ++q) // the sceGsStoreImage packet: its A+D writes
+        {
+            uint64_t value;
+            std::memcpy(&value, rdram + ((image + q * 16u) & 0x1ffffffu), 8);
+            const uint8_t address = rdram[(image + q * 16u + 8u) & 0x1ffffffu];
+            if (address == 0x50u)
+                bitbltbuf = value;
+            else if (address == 0x51u)
+                trxpos = value;
+            else if (address == 0x52u)
+                trxreg = value;
+        }
+        const uint32_t psm = (bitbltbuf >> 24) & 0x3fu, x0 = trxpos & 0x7ffu, y0 = (trxpos >> 16) & 0x7ffu;
+        const uint32_t width = trxreg & 0xfffu, height = (trxreg >> 32) & 0xfffu;
+        const bool sixteen = psm == 0x32u || psm == 0x3au;
+        if (width == 0u || height == 0u || width * height > 256u || (!sixteen && psm != 0x30u && psm != 0x31u))
+            return;
+        const ps2x::native::Screen view = screen();
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                uint32_t z = 0;
+                if (!renderer.depthAt(view.originX + static_cast<float>(x0 + x) + 0.5f, view.originY + static_cast<float>(y0 + y) + 0.5f, z))
+                    return;
+                const uint32_t at = (dest + (y * width + x) * (sixteen ? 2u : 4u)) & 0x1ffffffu;
+                // TMB_NATIVE_LOG_FLARES=1: some samples, the GS's then the native one.
+                static const bool s_log = std::getenv("TMB_NATIVE_LOG_FLARES") != nullptr;
+                static uint32_t s_logged = 0;
+                if (s_log && x == 0u && y == 0u && ++s_logged % 50u == 1u)
+                {
+                    uint32_t gs = 0;
+                    std::memcpy(&gs, rdram + at, sixteen ? 2u : 4u);
+                    std::fprintf(stderr, "[tmb:native] flare sample at (%u, %u) %ux%u psm %#x: GS %#x, native %#x\n", x0, y0, width, height, psm,
+                                 gs, z);
+                }
+                if (sixteen)
+                {
+                    const uint16_t z16 = static_cast<uint16_t>(std::min<uint32_t>(z >> 8, 0xffffu));
+                    std::memcpy(rdram + at, &z16, 2);
+                }
+                else
+                {
+                    const uint32_t z32 = psm == 0x31u ? std::min<uint32_t>(z, 0xffffffu) : z;
+                    std::memcpy(rdram + at, &z32, 4);
+                }
+            }
     }
 
     // The end of a frame's real-time processing (a match frame): publish what was submitted, start the next frame.

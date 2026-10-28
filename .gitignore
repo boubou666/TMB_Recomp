@@ -6,6 +6,7 @@
 *.cue
 iso_extract/
 game/
+game_us/
 *.elf
 *.ELF
 SCES_*
@@ -23,6 +24,7 @@ cmake-build-*/
 
 # Generated recompiled C++ (derived from the game binary; regenerate with scripts/recomp.sh)
 generated/
+generated_us/
 
 # Editor / OS noise
 .vscode/

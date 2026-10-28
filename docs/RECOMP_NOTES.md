@@ -950,3 +950,23 @@ back to the interpreter at that instruction). `scripts/iop_recomp.sh` boots the 
   let it go on as if it had returned (the bank load hung).
 - The sound is still paced by the IOP clock (the SPU2 mixes a sample per 768 IOP cycles): the native mixer on wall
   time, under libsd, is the next step.
+
+### USA release alongside the European one (2026-10-29)
+`TMB_REGION=us` (the default) builds the USA release, SCUS-97101 (SCUS_971.01, May 2001, NTSC), from `game_us/` into
+`generated_us/` and `build/game_us`; `TMB_REGION=pal` keeps the European one in `game/`, `generated/`, `build/game`.
+Both executables carry their full symbol tables, so everything hand-written is shared:
+- `runtime/` is written against the PAL addresses and marks them, `TMB_ADDR(...)` and `TMB_GP(...)`;
+  `tools/tmb_region_map.py` (run by `scripts/recomp.sh`) writes `tmb_region.h` with each one mapped to the region's
+  executable by the symbol holding it, or, for a file's unnamed statics (the timer's counters, the font buffer),
+  through the same instruction of the function using them; it also aliases the generated function names and gives
+  the override's registration name. PAL maps to itself (a check of the anchors). One function differs in size
+  (timerEndOfRealTimeProcessing, 0x70 bytes in PAL, 0x6c in USA): only its entry is hooked.
+- `recomp/tmb_manual.toml`: the recompiler's hand-written stubs by name, written into each region's config by
+  `tools/tmb_manual_toml.py` (`scripts/analyze.sh`).
+- The IRX modules are byte-identical on both discs. The VU1 microcode differs in two words only: the half field
+  height, 128.0 (PAL) and 112.0 (NTSC). NTSC draws a 640 x 224 field at 2048 - 112, which the native screen follows
+  (the GS scissor confirms 1936-2160).
+- The disc image is the `.iso` whose SYSTEM.CNF boots the executable (both images sit in the repository root).
+- First runs: USA boots, plays the movies, menus (its MOVIES entry), story intro and a match at 57.4 fps (median
+  59.2) on the PS2 path, 54.1 (median 56.3) native; the European build is unchanged.
+- The USA disc's character story cinematics (MOV/X*.PSS) are 70-136 MB each, the European disc's 5-12 MB.
