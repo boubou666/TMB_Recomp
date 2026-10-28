@@ -16,12 +16,15 @@
 #include "ps2_runtime.h"
 #include "runtime/native/native_renderer.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_vu1_sandbox.h"
+#include "runtime/ps2_memory.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +45,7 @@ namespace tmb::native
             Ribbon, // screen-wide quads between two points (trails): 0x3270, one per MSCNT
             Rain,   // the effects image's rain lines (0x1d40)
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
+            Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
         };
 
         Mode modeForSetup(uint32_t pc)
@@ -118,10 +122,23 @@ namespace tmb::native
             return lastSetupNative;
         }
 
+        // TMB_NATIVE_SANDBOX=0: the programs the adapter does not translate stay on VU1 (drawn by the GS, under the
+        // native frame with renderers that keep GS memory themselves); by default the adapter's own VU1 runs them and
+        // they are drawn natively too (ps2x::native::Vu1Sandbox).
+        bool sandboxed()
+        {
+            static const bool s_on = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_SANDBOX");
+                return !(value && *value == '0');
+            }();
+            return s_on;
+        }
+
         bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
         {
             static bool s_lastSetupNative = false; // the VIF1 thread's
-            return decide(s_lastSetupNative, vu1Code, startPc);
+            return decide(s_lastSetupNative, vu1Code, startPc) || sandboxed();
         }
 
         // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
@@ -141,7 +158,9 @@ namespace tmb::native
         {
             VuImage vu;
             uint32_t cl = 1, wl = 1;   // STCYCL
-            uint32_t base = 0, offset = 0, tops = 0, top = 0;
+            uint32_t base = 0, offset = 0, tops = 0, top = 0, itops = 0;
+            VIFRegisters vif{}; // STMOD, STMASK, STROW / STCOL (and STCYCL, TOPS) for vifUnpack
+            std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
             Mode mode = Mode::None;
             float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
             std::vector<float> pool;   // x, y, z per pool vertex (the object's space)
@@ -170,59 +189,6 @@ namespace tmb::native
         {
             uint64_t chains = 0, objects = 0, strips = 0, triangles = 0, textured = 0, skipped = 0;
         } g_stats;
-
-        int32_t signExtend(uint32_t value, uint32_t bits)
-        {
-            const uint32_t shift = 32u - bits;
-            return static_cast<int32_t>(value << shift) >> shift;
-        }
-
-        // UNPACK: num vectors of (vn + 1) components of vl bits, written every CL quadwords in groups of WL.
-        void unpack(State &s, uint32_t cmd, uint32_t num, uint32_t imm, const uint32_t *data, size_t dataWords)
-        {
-            const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u;
-            const bool usn = (imm >> 14) & 1u;
-            uint32_t addr = imm & 0x3ffu;
-            if ((imm >> 15) & 1u)
-                addr += s.tops;
-            const uint32_t n = num ? num : 256u;
-            const uint32_t components = vn + 1u;
-            const uint32_t bits = vl == 0 ? 32u : vl == 1 ? 16u : vl == 2 ? 8u : 5u;
-            const uint8_t *bytes = reinterpret_cast<const uint8_t *>(data);
-            const size_t available = dataWords * 4u;
-            for (uint32_t i = 0; i < n; ++i)
-            {
-                const uint32_t qw = s.cl >= s.wl ? addr + (i / s.wl) * s.cl + (i % s.wl) : addr + i;
-                for (uint32_t c = 0; c < 4u; ++c)
-                {
-                    if (vl == 3u) // V4-5: one 16-bit word, 5:5:5:1
-                    {
-                        if ((i * 2u + 2u) > available)
-                            return;
-                        const uint32_t v = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
-                        const uint32_t field = c < 3u ? ((v >> (5u * c)) & 0x1fu) << 3 : ((v >> 15) & 1u) << 7;
-                        s.vu.words[(qw & 0x3ffu) * 4 + c] = field;
-                        continue;
-                    }
-                    if (c >= components)
-                        continue; // V2 / V3: the lanes above are left (or masked by the game: TMB reads x, y only)
-                    const size_t bit = (static_cast<size_t>(i) * components + c) * bits;
-                    if ((bit + bits) / 8u > available)
-                        return;
-                    uint32_t raw = 0;
-                    if (bits == 32u)
-                        std::memcpy(&raw, bytes + bit / 8u, 4);
-                    else if (bits == 16u)
-                        raw = bytes[bit / 8u] | (bytes[bit / 8u + 1] << 8);
-                    else
-                        raw = bytes[bit / 8u];
-                    s.vu.words[(qw & 0x3ffu) * 4 + c] = (bits == 32u || usn) ? raw : static_cast<uint32_t>(signExtend(raw, bits));
-                }
-                if (vn == 0u && vl != 3u) // S-xx fills all four lanes with the one value
-                    for (uint32_t c = 1; c < 4u; ++c)
-                        s.vu.words[(qw & 0x3ffu) * 4 + c] = s.vu.words[(qw & 0x3ffu) * 4];
-            }
-        }
 
         // The fog factor a microprogram writes in XYZF2's F, over 255: clamp(VU 4.w + VU 21.x + VU 21.w / w, 0, VU 21.y)
         // (the same in the strip, sprite and ribbon programs; checked on 3000 strip vertices of the match trace).
@@ -796,11 +762,12 @@ namespace tmb::native
                 const uint32_t cmd = (code >> 24) & 0x7fu, num = (code >> 16) & 0xffu, imm = code & 0xffffu;
                 if ((cmd & 0x60u) == 0x60u)
                 {
-                    const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u, n = num ? num : 256u;
-                    const uint32_t bits = vl == 3u ? 16u : (vn + 1u) * (vl == 0 ? 32u : vl == 1 ? 16u : 8u);
-                    const size_t size = (static_cast<size_t>(n) * bits + 31u) / 32u;
-                    unpack(s, cmd, num, imm, words + i, std::min(size, count - i));
-                    i += size;
+                    // As VIF1 unpacks it (masks, row / column, add modes): the sandbox runs programs on this memory.
+                    s.vif.cycle = s.cl | (s.wl << 8);
+                    s.vif.tops = s.tops;
+                    const uint32_t used = ps2x::native::vifUnpack(s.vif, reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), code,
+                                                                  reinterpret_cast<const uint8_t *>(words + i), static_cast<uint32_t>((count - i) * 4u));
+                    i += (used + 3u) / 4u;
                     continue;
                 }
                 switch (cmd)
@@ -808,23 +775,39 @@ namespace tmb::native
                 case 0x01: s.cl = imm & 0xffu; s.wl = (imm >> 8) & 0xffu; if (s.wl == 0) s.wl = 1; break;
                 case 0x02: s.offset = imm & 0x3ffu; s.tops = s.base; break;
                 case 0x03: s.base = imm & 0x3ffu; s.tops = s.base; break;
+                case 0x04: s.itops = imm & 0x3ffu; break; // ITOP
+                case 0x05: s.vif.mode = imm & 3u; break;  // STMOD
                 case 0x14: // MSCAL
                 case 0x15: // MSCALF
                 case 0x17: // MSCNT
                 {
                     s.top = s.tops;
                     s.tops = s.tops == s.base ? s.base + s.offset : s.base;
-                    if (cmd == 0x17)
+                    if (cmd == 0x17 && s.mode == Mode::Sandbox)
+                        s.sandbox->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
+                    else if (cmd == 0x17)
                         strip(s, triangles);
                     else
                     {
                         const uint32_t pc = imm * 8u;
                         if (!decide(s.lastSetupNative, s.code, pc))
                         {
+                            if (s.sandbox)
+                            {
+                                // Another program (or a vertex pass after one): run here, drawn natively as the
+                                // next group (VU1 skips it: drawnNatively).
+                                flush(s, triangles);
+                                ps2x::native::Renderer::instance().beginGroup(++s.group);
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Sandbox;
+                                s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
+                                                s.top, s.itops);
+                            }
                             if (!matches(kVertexPasses, s.code, pc))
                             {
                                 flush(s, triangles);
-                                s.mode = Mode::None; // another program, or another code image's: still on VU1
+                                if (!s.sandbox)
+                                    s.mode = Mode::None; // another program, or another code image's: still on VU1
                                 ++g_stats.objects;
                                 ++g_stats.skipped;
                                 static const bool s_logVu1 = std::getenv("TMB_NATIVE_LOG_VU1") != nullptr;
@@ -874,21 +857,34 @@ namespace tmb::native
                     }
                     break;
                 }
-                case 0x20: i += 1; break;                                  // STMASK
-                case 0x30: case 0x31: i += 4; break;                       // STROW / STCOL
+                case 0x20: // STMASK
+                    if (i < count)
+                        s.vif.mask = words[i];
+                    i += 1;
+                    break;
+                case 0x30: // STROW
+                case 0x31: // STCOL
+                    if (i + 4u <= count)
+                        std::memcpy(cmd == 0x30 ? s.vif.row : s.vif.col, words + i, 16);
+                    i += 4;
+                    break;
                 case 0x4a: // MPG: keep the code image, to know which program an MSCAL starts
                 {
                     const size_t size = static_cast<size_t>(num ? num : 256u) * 2u;
                     const size_t at = static_cast<size_t>(imm) * 8u, bytes = std::min(size, count - i) * 4u;
                     if (at < sizeof(s.code))
                         std::memcpy(s.code + at, words + i, std::min(bytes, sizeof(s.code) - at));
+                    if (s.sandbox)
+                        s.sandbox->codeChanged();
                     i += size;
                     break;
                 }
-                case 0x50: case 0x51: // DIRECT: the GS front end draws it; the adapter only notes its TEX0
+                case 0x50: case 0x51: // DIRECT: the GS front end draws it; the adapter notes its registers
                 {
                     const size_t size = static_cast<size_t>(imm ? imm : 65536u) * 4u;
                     readDirect(s, words + i, std::min(size, count - i) / 4u);
+                    if (s.sandbox)
+                        s.sandbox->gif().registers(reinterpret_cast<const uint8_t *>(words + i), std::min(size, count - i) * 4u);
                     i += size;
                     break;
                 }
@@ -945,6 +941,8 @@ namespace tmb::native
         // TMB_NATIVE_VU1=1 keeps VU1 running them too (to compare with the GS frame).
         if (const char *keep = std::getenv("TMB_NATIVE_VU1"); !(keep && *keep == '1'))
         {
+            if (sandboxed())
+                state().sandbox = std::make_unique<ps2x::native::Vu1Sandbox>();
             ps2x::native::setVu1Gate(&drawnNatively);
             // In the GS stream where VU1's output would have been (with PS2X_GS_RENDERER=native: particles, the 2D
             // and the other GS draws sort with the 3D); with other GS renderers present() draws over the GS frame.
