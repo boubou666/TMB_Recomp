@@ -2,13 +2,14 @@
 
 # TMB_Recomp
 
-**A native Linux and Windows port of *Twisted Metal: Black* (PAL, `SCES-50360`), made by statically recompiling the game's PlayStation 2 code to C++.**<br>
-Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on a reimplementation of the PS2 hardware.
+**A native Linux and Windows port of *Twisted Metal: Black* (PAL, `SCES-50360`): the whole game recompiled to C++ and run on the PC itself.**<br>
+Not an emulator. The game's MIPS code (EE), its sound driver (IOP) and its VU1 microcode all run as native code; its 3D is
+drawn by a PC renderer from the game's own meshes, matrices and textures, and its sound is mixed on the PC's clock.
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
 ![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-17a35b)
-![Status](https://img.shields.io/badge/status-first%20match%20playable-e08a00)
+![Status](https://img.shields.io/badge/status-playable%2C%2050%20fps%20native-17a35b)
 
 </div>
 
@@ -24,11 +25,12 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 Picking the work up elsewhere: [`docs/HANDOFF.md`](docs/HANDOFF.md) (state, how to measure, next steps).
 
-**Work in progress: the first match is playable.** The game boots, runs its own IOP modules, shows the PAL language
-selection, plays the movies with their sound, goes through the menus and level loading, and runs the first match:
-driving, weapons, bots, HUD, music and effects, deaths, respawns and the game-over menu. It runs at about 45 frames
-per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the busiest moments), short of the PAL
-50; the other arenas, story mode and saving are not checked yet.
+**Playable, at the PAL 50 frames per second, as a native port.** The game boots, runs its own IOP modules, shows the
+PAL language selection, plays the movies with their sound, goes through the menus and level loading, and plays matches
+and story levels: driving, weapons, bots, HUD, music and effects, deaths, respawns, saving and loading. With the native
+path (`scripts/run_native.sh`) a full match runs at 49.2 fps on average (median 49.5, never under 40) on a Ryzen 7
+7800X3D. Still being checked: every arena and story level to the endings, and some effects against the PS2 picture
+(issues found while playing are fixed as they come: [docs/RECOMP_NOTES.md](docs/RECOMP_NOTES.md)).
 
 <p align="center">
   <img src="docs/screenshots/match_objective.jpg" width="49%" alt="The first match: an objective on screen and a car exploding">
@@ -51,10 +53,12 @@ per second on average on a Ryzen 7 7800X3D with the GPU renderer (35-39 in the b
 | Menus, level select, level loading | ✅ |
 | First match: HUD, cars, textured 3D, bots | ✅ |
 | Deaths, respawns, game over and replay | ✅ |
-| Full speed (50 fps) | 🔧 |
+| Full speed (50 fps; 49.2 average over a full match): native renderer, VU1 microcode as native code | ✅ |
 | Sound and music (989SND, movie audio) | ✅ |
+| Sound driver (989SND, LIBSD) recompiled, mixed on the PC's clock (not tied to the frame rate) | ✅ |
+| Every VU1 draw native (translated programs plus the VU1 sandbox); menus and 2D still on the GS path | 🔧 |
 | Multi-player split screen (two controllers; `PS2X_PAD2_SCRIPT` for a scripted player 2) | ✅ |
-| Story mode, saving | ⏳ |
+| Every arena and story level to the endings | 🔧 |
 | Widescreen, higher resolution | ⏳ |
 
 ✅ works · 🔧 in progress · ⏳ not reached yet
@@ -64,32 +68,47 @@ what remains open.
 
 ## Goal
 
-A fully playable *Twisted Metal: Black* as a native executable, from the intro to the endings. Accuracy first; once it
-is playable, widescreen and higher internal resolution.
+A fully playable *Twisted Metal: Black* as a true PC program, from the intro to the endings: no PS2 hardware simulated
+where the PC can do the job itself. Accuracy first; then widescreen, higher resolution and frame rates above 50.
 
 ## How it works
+
+The port started as a static recompilation on a reimplementation of the PS2 hardware, and is becoming a native PC
+program piece by piece. Each piece below replaces a part of the PS2 that was simulated:
+
+| Part of the game | On the PS2 | In the port |
+|---|---|---|
+| Game code (EE, MIPS R5900) | the EE CPU | 3,572 functions recompiled to C++ (`generated/`), with the ELF's own symbols |
+| Sound driver (IOP: 989SND, LIBSD) | R3000A code on the IOP | recompiled to C++ by the fork's `tools/iop_recomp.py` (`scripts/iop_recomp.sh`, `PS2X_IOP_NATIVE=1`) |
+| Sound mixing (SPU2) | the SPU2 chip, at the IOP's pace | mixed when the PC's audio device asks (`PS2X_SPU2_WALLCLOCK=1`), with the IOP on the PC's clock (`PS2X_IOP_WALLCLOCK=1`): the sound no longer slows down with the frame rate |
+| 3D (hier renderer: terrain, buildings, cars, characters) | VU1 microprograms, then the GS | read from the game's own data as it is sent (meshes, matrices, lights, materials) and drawn by the native renderer (`runtime/tmb_native.cpp`, `TMB_NATIVE=1`); VU1 does not run them |
+| Skinned characters, sprites, rain, fog, blending | VU1, GS | translated into the native renderer's terms (bones, fog factor, blend modes) |
+| Other VU1 programs (particles, billboards, beams) | VU1 | run on the PC by a VU1 sandbox on the adapter's copy of VU memory, their GS packets drawn natively: every VU1 draw of a match is native |
+| Textures | GS memory | decoded on the PC from the game's own uploads, palettes included |
+| Menus, 2D, movies | GS, IPU | still on the GS path (paraLLEl-GS on the GPU, or the CPU rasterizer); movies decoded with FFmpeg |
 
 ```
 disc files (game/) ──► ps2_analyzer ──► recomp/tmb_sces50360.toml (SDK stubs, entry points, jump tables)
                                            │
                      ps2_recomp + the ELF's own symbol table ──► C++ (one file per function, generated/)
+   989SND, LIBSD as the IOP loads them ──► iop_recomp.py ──► C++ (generated/iop/)
                                            │
-                 CMakeLists.txt ──► PS2Recomp runtime + generated code + runtime/tmb_overrides.cpp
+                 CMakeLists.txt ──► PS2Recomp runtime + generated code + runtime/ (TMB's overrides, native adapter)
                                            │
-   PS2Recomp runtime: EE kernel HLE · DMAC · GIF/GS · VIF/VU0/VU1 · IPU ─┼─► ps2EntryRunner
-   PS2Recomp IOP:     R3000A interpreter running the game's own IRX · SPU2 · SIO2
+   native renderer · VU1 sandbox · texture cache · SPU2 mixer on the PC clock ─┼─► ps2EntryRunner
+   what is left of the PS2: EE kernel HLE · DMAC · GIF/GS (2D) · VIF · IPU · IOP kernel and other modules
 ```
 
 - The PAL executable ships with its full symbol table (3,572 named functions, `.mdebug`), so no Ghidra pass is needed:
   `ps2_analyzer` reads the symbols, recognises the Sony SDK functions that have runtime handlers and writes the config.
 - PS2Recomp turns every function into C++ and emits the address-indexed function table.
-- The top-level `CMakeLists.txt` builds the fork's runtime, swaps its placeholder function table for the generated one
-  and links everything into `ps2EntryRunner`.
-- `runtime/tmb_overrides.cpp` holds the game-specific bindings.
+- `runtime/tmb_native.cpp` is TMB's native adapter: it reads every VIF1 stream the game sends and draws it natively,
+  and tells VU1 which programs to skip. The generic parts live in the fork (`ps2xRuntime/src/lib/native/`: renderer,
+  texture cache, VU1 sandbox, GIF translation; `docs/native.md`), shared with the other ports.
+- `runtime/tmb_overrides.cpp` holds the other game-specific bindings.
 
 The PS2Recomp fork lives in `PS2Recomp/` (git submodule, [boubou666/PS2Recomp](https://github.com/boubou666/PS2Recomp)),
-shared with the *Valkyrie Profile 2* and *Drakengard* recompilations. Fixes made for this port land there, starting with
-the GCC/Clang build flags for the runtime's AVX2 code.
+shared with the *Valkyrie Profile 2* and *Drakengard* recompilations. Fixes made for this port land there.
 
 ## Requirements
 
@@ -110,7 +129,9 @@ scripts/extract_iso.sh "/path/to/Twisted Metal - Black (Europe).iso"   # disc fi
 scripts/build_tools.sh                                                  # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
 scripts/recomp.sh                                                       # ELF + recomp/tmb_sces50360.toml -> generated/ (VU1 microcode -> generated/vu1/)
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game
-scripts/run.sh                                                          # ps2EntryRunner game/SCES_503.60
+scripts/iop_recomp.sh                                                   # optional: boots once to recompile the sound driver -> generated/iop/, then rebuild
+scripts/run_native.sh                                                   # the native port (native renderer, recompiled sound driver, sound on the PC clock)
+scripts/run.sh                                                          # the PS2 path only (VU1 and GS simulated), for comparison
 scripts/pgo.sh                                                          # optional, experimental: profile-guided rebuild (~200 s of scripted play)
 ```
 
@@ -158,6 +179,14 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 
 | Variable | Effect |
 |---|---|
+| `TMB_NATIVE=1` | The native renderer draws TMB's 3D from its own data (`scripts/run_native.sh` sets it) |
+| `TMB_NATIVE_SANDBOX=0` | The VU1 programs the adapter does not translate stay on VU1 and the GS (default: the VU1 sandbox runs them, drawn natively) |
+| `TMB_NATIVE_VU1=1` | VU1 runs the translated programs too (the GS frame then has everything, to compare) |
+| `TMB_NATIVE_VU1_PCS=<pc,...>` / `TMB_NATIVE_SANDBOX_PCS=<pc,...>` | Leave those setups on VU1 / run translated ones on the sandbox (to compare a program with VU1) |
+| `PS2X_NATIVE_VIEW=only` | Show the native frame alone, without the GS one under it |
+| `PS2X_NATIVE_INTERPOLATE=1`, `PS2X_PRESENT_FPS=<n>` | Draw frames between the game's 50 (objects interpolated), presented at up to n per second |
+| `PS2X_IOP_NATIVE=1` | Run the recompiled sound driver (`scripts/iop_recomp.sh` generates it) |
+| `PS2X_SPU2_WALLCLOCK=1`, `PS2X_IOP_WALLCLOCK=1` | Mix the sound when the audio device asks, and run the IOP on the PC's clock |
 | `PS2X_CAPTURE_DIR=<dir>`, `PS2X_CAPTURE_INTERVAL=<s>` | Save the presented frame every few seconds (works minimized) |
 | `PS2X_PAD_SCRIPT=t:BUTTON[/ms],…` | Scripted button presses (seconds from start), for unattended runs |
 | `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for `ps2_vu1_replay` / `build/game/tmb_vu1_replay` (with the compiled microcode; the default fast VU1 path differs in cycle counts only, `TMB_VU1_EXACT=1 scripts/recomp.sh` for the exact one) |
