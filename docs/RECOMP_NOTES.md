@@ -896,3 +896,14 @@ it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf40
   loop (0x1910) lights each vertex with three point lights (positions 169-171 / vf9-vf11, colours 172-174, range
   175), ambient (vf29), light directions 165-167, clamps to 255, clips against the guard band (vf31, +-2048) and
   writes STQ, RGBAQ, XYZF2; the packet starts with A+D writes of TEX0 / TEX1 (the texture).
+- Textures (match, one second): 114 distinct TEX0, all palettized: T4 / T8 with CT32 palettes, and T8H / T4HL /
+  T4HH (indices in the high bits of 32-bit words, resident textures at TBP 0-4608). The texture manager keeps a
+  VRAM cache (`texmFindVramSpace`, `texmUpdateLastUsed`); its table at 0x4D4930 has 16 bytes per texture number:
+  +0 the texture's data (a header: size, hash, number, format word such as 0x10205613 = T8 64x32; then a VIF1 chain
+  ending in RET, DIRECT to the GIF: BITBLTBUF / TRXPOS / TRXREG / TRXDIR and the IMAGE data), +4 the state (bit 31
+  resident, bits 0-13 VRAM slot, bits 25-27 mip levels, which are the following texture numbers), +8 a number.
+  `tools/tmb_textures.py` reads it from a TMB_DUMP_RDRAM dump (308 textures). Palettes are not in that data: each
+  texture's CBP is its own slot in a region at 7700-8500 filled at level load, and the models' materials carry the
+  TEX0 with it. So the native texture cache works from the game's GS uploads (a copy of GS memory, decoded on use).
+- PS2X_GS_RECORD never started in a match: it waits for a moment with no image transfer, and TMB uploads textures
+  all the time.

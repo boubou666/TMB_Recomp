@@ -1167,11 +1167,35 @@ namespace
             std::fprintf(stderr, "[tmb:kill] %d of %d vehicles hit\n", killed, count);
     }
 
+    // TMB_DUMP_RDRAM=<s> (native port work): after <s> seconds of TheGame::Update (50 updates a second), the 32 MB of
+    // EE memory to build/rdram.bin, once, for offline decoding of the game's own data (texture table at 0x4D4930,
+    // meshes): tools/tmb_textures.py.
+    void dumpRdramOnce(uint8_t *rdram)
+    {
+        static const uint32_t s_at = []
+        {
+            const char *value = std::getenv("TMB_DUMP_RDRAM");
+            return value && *value ? static_cast<uint32_t>(std::atof(value) * 50.0) : 0u;
+        }();
+        static uint32_t s_updates = 0;
+        if (s_at == 0u || ++s_updates != s_at)
+            return;
+        if (FILE *out = std::fopen("build/rdram.bin", "wb"))
+        {
+            std::fwrite(rdram, 1, PS2_RAM_SIZE, out);
+            std::fclose(out);
+            std::fprintf(stderr, "[tmb:dump] EE memory written to build/rdram.bin\n");
+        }
+    }
+
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_theGame = getRegU32(ctx, 4); // TMB_ENEMY_HEALTH_CAP, TMB_KILL_ENEMIES
         if (g_substeps.steps == 0)
+        {
             killEnemies(rdram, ctx, runtime);
+            dumpRdramOnce(rdram);
+        }
         Substeps &s = g_substeps;
         if (!g_timeline.path.empty() && s.steps == 0)
         {
