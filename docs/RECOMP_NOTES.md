@@ -907,3 +907,13 @@ it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf40
   TEX0 with it. So the native texture cache works from the game's GS uploads (a copy of GS memory, decoded on use).
 - PS2X_GS_RECORD never started in a match: it waits for a moment with no image transfer, and TMB uploads textures
   all the time.
+
+### Native path state (TMB_NATIVE=1, 2026-10-28)
+The adapter (`runtime/tmb_native.cpp`) reads every VIF1 stream the game sends (the fork's `setVif1Observer`) and
+draws natively, then tells VU1 to skip (`setVu1Gate`): the hier strips (unlit, scaled, directional, point lights),
+sprites (0x3000), ribbons (0x3270) and the effects image's rain (0x1d40). Still drawn by the PS2 path (VU1 / GS),
+under the native frame: the 2D (menus, HUD text and font drawn as GS packets), the opening movies (IPU), the rare
+0x1db8 strip program (environment mapping), the effects image's other programs (0x1f30 splashes, 0x2338).
+- `PS2X_NATIVE_VIEW=only` hides the GS frame to look at the native one alone: menus and movies then show only while
+  the native frame is empty (the GS frame comes back then); in a match, anything still on the PS2 path is missing.
+- `TMB_NATIVE_VU1=1` keeps VU1 running the native programs too (the GS frame then has everything, for comparison).

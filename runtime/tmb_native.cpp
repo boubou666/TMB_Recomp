@@ -39,6 +39,7 @@ namespace tmb::native
             Point,
             Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
             Ribbon, // screen-wide quads between two points (trails): 0x3270, one per MSCNT
+            Rain,   // the effects image's rain lines (0x1d40)
         };
 
         Mode modeForSetup(uint32_t pc)
@@ -53,6 +54,28 @@ namespace tmb::native
             case 0x3270: return Mode::Ribbon;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
             }
+        }
+
+        // The microprograms this adapter draws, recognised by the lower instruction at each entry (so only while their
+        // code image is loaded): the hier image's vertex pass, four strip setups, sprites and ribbons, and the effects
+        // image's rain. VU1 skips them (and the MSCNTs that continue them); the others still run.
+        constexpr struct
+        {
+            uint32_t pc, lower;
+        } kNativePrograms[] = {{0x0000u, 0x400001d4u}, {0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u},
+                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}, {0x3000u, 0x420f0580u},
+                               {0x3270u, 0x420f0532u}, {0x1d40u, 0x420f07deu}};
+
+        bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
+        {
+            for (const auto &program : kNativePrograms)
+                if (program.pc == startPc)
+                {
+                    uint32_t lower;
+                    std::memcpy(&lower, vu1Code + startPc, 4);
+                    return lower == program.lower;
+                }
+            return false;
         }
 
         // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
@@ -79,6 +102,13 @@ namespace tmb::native
             uint64_t tex0 = 0;
             bool haveTexture = false;
             bool blended = false; // the strip's PRIM.ABE
+            uint8_t code[16 * 1024] = {}; // VU1 micro memory as the stream's MPGs fill it
+            uint64_t directTex0 = 0;       // the last TEX0_1 the stream's DIRECT packets set (the rain's texture)
+            uint64_t alpha = 0x44;         // ALPHA_1 as the stream's DIRECT packets set it (how blended draws blend)
+            uint64_t batchAlpha = 0x44;    // the ALPHA_1 of the batch being built
+            bool fogged = false;           // the strip's PRIM.FGE
+            uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it
+            uint32_t batchFogColour = 0;
         };
 
         struct Stats
@@ -137,6 +167,13 @@ namespace tmb::native
                     for (uint32_t c = 1; c < 4u; ++c)
                         s.vu.words[(qw & 0x3ffu) * 4 + c] = s.vu.words[(qw & 0x3ffu) * 4];
             }
+        }
+
+        // The fog factor a microprogram writes in XYZF2's F, over 255: clamp(VU 4.w + VU 21.x + VU 21.w / w, 0, VU 21.y)
+        // (the same in the strip, sprite and ribbon programs; checked on 3000 strip vertices of the match trace).
+        float fogFactor(const VuImage &vu, float q)
+        {
+            return std::min(std::max(vu.f(4, 3) + vu.f(21, 0) + vu.f(21, 3) * q, 0.0f), vu.f(21, 1)) / 255.0f;
         }
 
         uint32_t clampByte(float v)
@@ -242,13 +279,17 @@ namespace tmb::native
                         textured = true;
                     }
                 }
-            const bool blended = ((tag1 >> 15) & 0x40u) != 0u;
-            if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended)
+            const bool blended = ((tag1 >> 15) & 0x40u) != 0u, fogged = ((tag1 >> 15) & 0x20u) != 0u;
+            if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended || (blended && s.alpha != s.batchAlpha) ||
+                fogged != s.fogged || (fogged && s.fogColour != s.batchFogColour))
             {
                 flush(s, triangles);
                 s.tex0 = tex0;
                 s.haveTexture = textured;
                 s.blended = blended;
+                s.batchAlpha = s.alpha;
+                s.fogged = fogged;
+                s.batchFogColour = s.fogColour;
             }
             return true;
         }
@@ -288,6 +329,7 @@ namespace tmb::native
                 quad[i].u = static_cast<float>(static_cast<int32_t>(vu.w(top + 3 + i, 0))) / 4096.0f;
                 quad[i].v = static_cast<float>(static_cast<int32_t>(vu.w(top + 3 + i, 1))) / 4096.0f;
                 quad[i].rgba = colour;
+                quad[i].fog = fogFactor(vu, q);
             }
             const int order[6] = {0, 1, 2, 1, 2, 3};
             for (int i : order)
@@ -326,6 +368,7 @@ namespace tmb::native
                 quad[k].rgba = clampByte(rgba[0]) | (clampByte(rgba[1]) << 8) | (clampByte(rgba[2]) << 16) | (clampByte(rgba[3]) << 24);
                 quad[k].u = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 0))) / 4096.0f + vu.f(4, 0);
                 quad[k].v = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 1))) / 4096.0f + vu.f(4, 1);
+                quad[k].fog = fogFactor(vu, q);
             }
             const int order[6] = {0, 1, 2, 1, 2, 3};
             for (int i : order)
@@ -370,6 +413,8 @@ namespace tmb::native
                 out.rgba = shade(s, normal, rgba, pos);
                 out.u = static_cast<float>(static_cast<int32_t>(s.vu.w(q + 2, 0))) / 4096.0f + uOffset;
                 out.v = static_cast<float>(static_cast<int32_t>(s.vu.w(q + 2, 1))) / 4096.0f + vOffset;
+                const float w = s.matrix[3] * pos[0] + s.matrix[7] * pos[1] + s.matrix[11] * pos[2] + s.matrix[15];
+                out.fog = w > 0.0f ? fogFactor(s.vu, 1.0f / w) : 0.0f;
                 strip.push_back(out);
             }
             for (size_t i = 2; i < strip.size(); ++i)
@@ -382,6 +427,19 @@ namespace tmb::native
             }
         }
 
+        // The GS blend (A - B) * C + D (ALPHA_1: A, B, D pick Cs / Cd / 0, C picks As / Ad / FIX) as a PC blend: Cs
+        // over Cd by As (TMB's 0x44), or Cs * As added to Cd (0x48, and 0x49's Cd * As + Cd, which brightens what is
+        // behind: drawn as additive too).
+        ps2x::native::Material::Blend blendFor(uint64_t alpha)
+        {
+            const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, d = (alpha >> 6) & 3u;
+            if (b == 2u && d == 1u)
+                return ps2x::native::Material::Blend::Additive; // (A - 0) * C + Cd
+            if (a == 0u && b == 1u && d == 1u)
+                return ps2x::native::Material::Blend::Alpha; // (Cs - Cd) * C + Cd
+            return ps2x::native::Material::Blend::Alpha;
+        }
+
         void flush(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             if (triangles.empty())
@@ -391,11 +449,134 @@ namespace tmb::native
             ps2x::native::Material material;
             material.textured = s.haveTexture;
             material.tex0 = s.tex0;
-            material.blend = s.blended ? ps2x::native::Material::Blend::Alpha : ps2x::native::Material::Blend::Opaque;
+            material.blend = s.blended ? blendFor(s.batchAlpha) : ps2x::native::Material::Blend::Opaque;
+            material.depthWrite = s.mode != Mode::Rain;
+            material.fog = s.fogged && s.mode != Mode::Rain;
+            material.fogColour = s.batchFogColour;
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Ribbon ? kScreenSpace : s.matrix, triangles.data(),
+            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Ribbon || s.mode == Mode::Rain ? kScreenSpace : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
             triangles.clear();
+        }
+
+        // The effects image's rain (0x1d40, setup at 0x1c38): VU 20.w drops, each a line from A (p + VU 12) to
+        // B (p + VU 12 - VU 14), A = VU 0-3 and B = VU 8-11 with their z rows scaled by 1/16. The drops' p follow a fixed
+        // recurrence, so they stay put in the world, tiled every VU 15.w units and falling as VU 12 moves:
+        //   u0 = (VU 15 + VU 21) s, u' = wrap(u) VU 21 + VU 15 s (s = VU 15.w), wrap: minus s above s;
+        //   p0 = VU 21, p1 = VU 15 s, then wrap(u), each plus s below VU 13 (the box around the camera).
+        // The head's alpha is 255 - 3.1875 w (the tail's w), the tail's 1; lines that fade out, leave a 480-pixel guard
+        // band, lie behind the camera or are too far (z under 2049 - 480) are dropped. VU1 rounds by truncation, so
+        // this sequence drifts from VU1's after some drops: the same rain, not the same drops. Each line is drawn as a
+        // one-pixel quad in screen space.
+        void rain(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            flush(s, triangles);
+            const VuImage &vu = s.vu;
+            s.mode = Mode::Rain;
+            s.tex0 = s.directTex0;
+            s.haveTexture = s.directTex0 != 0u;
+            s.blended = true;
+            s.batchAlpha = s.alpha;
+            float a[4][4], b[4][4];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                {
+                    a[j][k] = vu.f(j, k) * (k == 2 ? 0.0625f : 1.0f);
+                    b[j][k] = vu.f(8 + j, k) * (k == 2 ? 0.0625f : 1.0f);
+                }
+            const float step = vu.f(15, 3);
+            float head[3], tail[3], c[3], mul[3], box[3], p[3], next[3], u[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                head[k] = vu.f(12, k);
+                tail[k] = vu.f(12, k) - vu.f(14, k);
+                c[k] = vu.f(15, k) * step;
+                mul[k] = vu.f(21, k);
+                box[k] = vu.f(13, k);
+                p[k] = mul[k];
+                next[k] = c[k] < box[k] ? c[k] + step : c[k];
+                u[k] = (vu.f(15, k) + mul[k]) * step;
+            }
+            auto transform = [](const float m[4][4], const float *q, const float *offset, float out[4])
+            {
+                for (int k = 0; k < 4; ++k)
+                    out[k] = m[0][k] * (q[0] + offset[0]) + m[1][k] * (q[1] + offset[1]) + m[2][k] * (q[2] + offset[2]) + m[3][k];
+            };
+            const uint32_t drops = std::min(vu.w(20, 3), 65536u);
+            for (uint32_t n = 0; n < drops; ++n)
+            {
+                float h[4], t[4];
+                transform(a, p, head, h);
+                transform(b, p, tail, t);
+                for (int k = 0; k < 3; ++k)
+                {
+                    p[k] = next[k];
+                    const float wrapped = u[k] > step ? u[k] - step : u[k];
+                    next[k] = wrapped < box[k] ? wrapped + step : wrapped;
+                    u[k] = wrapped * mul[k] + c[k];
+                }
+                if (h[3] <= 0.0f || t[3] <= 0.0f)
+                    continue;
+                const float alpha = std::round(255.0f - 3.1875f * t[3]);
+                const float hx = h[0] / h[3], hy = h[1] / h[3], hz = h[2] / h[3];
+                const float tx = t[0] / t[3], ty = t[1] / t[3], tz = t[2] / t[3];
+                if (alpha < 1.0f || std::fabs(hx - 2048.0f) > 480.0f || std::fabs(hy - 2048.0f) > 480.0f ||
+                    std::fabs(tx - 2048.0f) > 480.0f || std::fabs(ty - 2048.0f) > 480.0f || hz < 1569.0f || tz < 1569.0f)
+                    continue;
+                const float dx = tx - hx, dy = ty - hy;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length <= 0.0f)
+                    continue;
+                const float nx = -dy / length * 0.5f, ny = dx / length * 0.5f;
+                const float corner[4][3] = {{hx + nx, hy + ny, hz}, {hx - nx, hy - ny, hz}, {tx + nx, ty + ny, tz}, {tx - nx, ty - ny, tz}};
+                ps2x::native::Vertex quad[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    quad[i].x = corner[i][0];
+                    quad[i].y = corner[i][1];
+                    quad[i].z = corner[i][2];
+                    quad[i].rgba = 0x00808080u | ((i < 2 ? static_cast<uint32_t>(alpha) : 1u) << 24);
+                }
+                const int order[6] = {0, 1, 2, 1, 2, 3};
+                for (int i : order)
+                    triangles.push_back(quad[i]);
+            }
+            flush(s, triangles);
+            s.mode = Mode::None;
+        }
+
+        // TEX0_1 and ALPHA_1 among a DIRECT packet's A+D writes (PACKED GIF tags).
+        void readDirect(State &s, const uint32_t *words, size_t qwords)
+        {
+            size_t q = 0;
+            while (q < qwords)
+            {
+                const uint64_t lo = words[q * 4] | (static_cast<uint64_t>(words[q * 4 + 1]) << 32);
+                const uint64_t regs = words[q * 4 + 2] | (static_cast<uint64_t>(words[q * 4 + 3]) << 32);
+                ++q;
+                const uint32_t nloop = lo & 0x7fffu, flg = (lo >> 58) & 3u;
+                const uint32_t nreg = ((lo >> 60) & 0xfu) ? static_cast<uint32_t>((lo >> 60) & 0xfu) : 16u;
+                if (flg == 0u)
+                {
+                    for (uint32_t loop = 0; loop < nloop && q < qwords; ++loop)
+                        for (uint32_t r = 0; r < nreg && q < qwords; ++r, ++q)
+                            if (((regs >> (4u * r)) & 0xfu) == 0xeu)
+                            {
+                                const uint64_t value = words[q * 4] | (static_cast<uint64_t>(words[q * 4 + 1]) << 32);
+                                const uint32_t address = words[q * 4 + 2] & 0xffu;
+                                if (address == 0x06u)
+                                    s.directTex0 = value;
+                                else if (address == 0x42u)
+                                    s.alpha = value;
+                                else if (address == 0x3du)
+                                    s.fogColour = static_cast<uint32_t>(value & 0xffffffu);
+                            }
+                }
+                else if (flg == 1u)
+                    q += (static_cast<size_t>(nloop) * nreg + 1u) / 2u;
+                else
+                    q += nloop;
+            }
         }
 
         void runVif(State &s, const uint32_t *words, size_t count)
@@ -431,7 +612,19 @@ namespace tmb::native
                     else
                     {
                         const uint32_t pc = imm * 8u;
-                        if (pc == 0x0000u)
+                        if (!drawnNatively(s.code, pc))
+                        {
+                            if (pc != 0x0000u)
+                            {
+                                flush(s, triangles);
+                                s.mode = Mode::None; // another program, or another code image's: still on VU1
+                                ++g_stats.objects;
+                                ++g_stats.skipped;
+                            }
+                        }
+                        else if (pc == 0x1d40u)
+                            rain(s, triangles);
+                        else if (pc == 0x0000u)
                             vertexPass(s);
                         else
                         {
@@ -443,8 +636,22 @@ namespace tmb::native
                 }
                 case 0x20: i += 1; break;                                  // STMASK
                 case 0x30: case 0x31: i += 4; break;                       // STROW / STCOL
-                case 0x4a: i += static_cast<size_t>(num ? num : 256u) * 2u; break; // MPG
-                case 0x50: case 0x51: i += static_cast<size_t>(imm ? imm : 65536u) * 4u; break; // DIRECT: the GS front end sees it
+                case 0x4a: // MPG: keep the code image, to know which program an MSCAL starts
+                {
+                    const size_t size = static_cast<size_t>(num ? num : 256u) * 2u;
+                    const size_t at = static_cast<size_t>(imm) * 8u, bytes = std::min(size, count - i) * 4u;
+                    if (at < sizeof(s.code))
+                        std::memcpy(s.code + at, words + i, std::min(bytes, sizeof(s.code) - at));
+                    i += size;
+                    break;
+                }
+                case 0x50: case 0x51: // DIRECT: the GS front end draws it; the adapter only notes its TEX0
+                {
+                    const size_t size = static_cast<size_t>(imm ? imm : 65536u) * 4u;
+                    readDirect(s, words + i, std::min(size, count - i) / 4u);
+                    i += size;
+                    break;
+                }
                 default: break;
                 }
             }
@@ -485,26 +692,6 @@ namespace tmb::native
             ++g_stats.chains;
         }
 
-        // The hier microprograms this adapter draws, recognised by the lower instruction at each entry: the vertex
-        // pass, the four strip setups, the sprites' and the ribbons'. VU1 skips them (and the strips that continue them); the others still run.
-        constexpr struct
-        {
-            uint32_t pc, lower;
-        } kNativePrograms[] = {{0x0000u, 0x400001d4u}, {0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u},
-                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}, {0x3000u, 0x420f0580u},
-                               {0x3270u, 0x420f0532u}};
-
-        bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
-        {
-            for (const auto &program : kNativePrograms)
-                if (program.pc == startPc)
-                {
-                    uint32_t lower;
-                    std::memcpy(&lower, vu1Code + startPc, 4);
-                    return lower == program.lower;
-                }
-            return false;
-        }
     }
 
     void install()
