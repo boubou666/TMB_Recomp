@@ -919,6 +919,10 @@ Before that, those were drawn by the GS under the native frame: with paraLLEl-GS
 and showed through what they drew (a see-through building). `TMB_NATIVE_SANDBOX=0` leaves them on VU1. Still on the
 PS2 path: the 2D (menus, HUD text and font drawn as GS packets) and the opening movies (IPU).
 - Native draws are clipped to the GS scissor where their group's marker reaches the GS (the rear-view camera's strip).
+- Only in matches (an end of real-time processing in the last three vblanks): the menus (the shell overlay's loop) draw
+  with their own screen setup and stay on VU1 and the GS; the vblank handler publishes an empty native frame there.
+  The adapter queues its decision for each MSCAL as it reads the stream and the VU1 gate takes it, so both count the
+  same skipped programs (the GS stream's groups) whatever changes in between.
 - `TMB_NATIVE_LOG_VU1=1` counts the programs left on VU1 (with `TMB_NATIVE_SANDBOX=0`), `TMB_NATIVE_DUMP_CODE=<dir>`
   writes their code image, `TMB_NATIVE_HIDE=<pc,...>` has VU1 skip them, drawn by nobody (to see what they are).
 - `PS2X_NATIVE_VIEW=only` hides the GS frame to look at the native one alone: menus and movies then show only while

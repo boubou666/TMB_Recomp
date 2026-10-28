@@ -46,6 +46,7 @@ namespace tmb::native
 {
     void install();
     void onFrameEnd();
+    void onVblank();
     bool enabled();
 }
 
@@ -639,6 +640,7 @@ namespace
         timelineEvent('B');
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
         updateGsLag(rdram, runtime);
+        tmb::native::onVblank(); // TMB_NATIVE: publishes the menus' frames
         if (!g_traceMovie)
             return;
         static uint32_t s_dispCalls = 0;

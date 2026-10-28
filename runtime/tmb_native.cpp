@@ -24,7 +24,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -135,10 +137,42 @@ namespace tmb::native
             return s_on;
         }
 
+        // vblanks since the last end of a match frame: the menus (the shell overlay's loop) have none, and draw with
+        // their own screen setup; the native path is for matches, the menus stay on VU1 and the GS.
+        uint32_t g_vblanksSinceFrameEnd = 0;
+        bool inMatch() { return g_vblanksSinceFrameEnd < 3u; }
+
+        // What the adapter decided for each MSCAL as it read the stream (at the transfer's start, on the EE thread),
+        // for the VU1 gate when VIF1 gets to it: the two agree program for program (the GS stream's groups count
+        // the skipped ones on both sides), whatever changed in between (a match starting, a menu).
+        struct Decision
+        {
+            uint32_t pc = 0;
+            bool skipped = false;
+        };
+        std::mutex g_decisionsMutex;
+        std::deque<Decision> g_decisions;
+
+        void noteDecision(uint32_t pc, bool skipped)
+        {
+            std::lock_guard<std::mutex> lock(g_decisionsMutex);
+            g_decisions.push_back({pc, skipped});
+            if (g_decisions.size() > 65536u) // nobody takes them (no gate)
+                g_decisions.pop_front();
+        }
+
         bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
         {
-            static bool s_lastSetupNative = false; // the VIF1 thread's
-            return decide(s_lastSetupNative, vu1Code, startPc) || sandboxed();
+            (void)vu1Code;
+            std::lock_guard<std::mutex> lock(g_decisionsMutex);
+            while (!g_decisions.empty())
+            {
+                const Decision decision = g_decisions.front();
+                g_decisions.pop_front();
+                if (decision.pc == startPc)
+                    return decision.skipped;
+            }
+            return false; // a transfer the adapter did not see: VU1 draws it
         }
 
         // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
@@ -790,9 +824,12 @@ namespace tmb::native
                     else
                     {
                         const uint32_t pc = imm * 8u;
-                        if (!decide(s.lastSetupNative, s.code, pc))
+                        const bool native = decide(s.lastSetupNative, s.code, pc) && inMatch();
+                        const bool sandbox = !native && s.sandbox && inMatch();
+                        noteDecision(pc, native || sandbox);
+                        if (!native)
                         {
-                            if (s.sandbox)
+                            if (sandbox)
                             {
                                 // Another program (or a vertex pass after one): run here, drawn natively as the
                                 // next group (VU1 skips it: drawnNatively).
@@ -803,11 +840,13 @@ namespace tmb::native
                                 s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
                                                 s.top, s.itops);
                             }
-                            if (!matches(kVertexPasses, s.code, pc))
+                            else
                             {
                                 flush(s, triangles);
-                                if (!s.sandbox)
-                                    s.mode = Mode::None; // another program, or another code image's: still on VU1
+                                s.mode = Mode::None; // on VU1 (a menu's, or with TMB_NATIVE_SANDBOX=0): its MSCNTs too
+                            }
+                            if (!matches(kVertexPasses, s.code, pc))
+                            {
                                 ++g_stats.objects;
                                 ++g_stats.skipped;
                                 static const bool s_logVu1 = std::getenv("TMB_NATIVE_LOG_VU1") != nullptr;
@@ -950,25 +989,43 @@ namespace tmb::native
         }
     }
 
-    // The end of a frame's real-time processing: publish what was submitted, start the next frame.
+    namespace
+    {
+        // Publishes what was submitted and starts the next frame.
+        void publish()
+        {
+            ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
+            static uint32_t s_frames = 0;
+            if (++s_frames % 250u == 0u)
+            {
+                const State &s = state();
+                std::fprintf(stderr, "[tmb:native] per 250 frames: %llu chains, %llu objects (%llu not native), %llu strips, %llu triangles, %llu textured batches; matrix col3 (%.1f %.1f %.1f %.1f)\n",
+                             static_cast<unsigned long long>(g_stats.chains), static_cast<unsigned long long>(g_stats.objects),
+                             static_cast<unsigned long long>(g_stats.skipped), static_cast<unsigned long long>(g_stats.strips),
+                             static_cast<unsigned long long>(g_stats.triangles), static_cast<unsigned long long>(g_stats.textured),
+                             s.matrix[12], s.matrix[13], s.matrix[14], s.matrix[15]);
+                g_stats = Stats{};
+            }
+            renderer.endFrame();
+            renderer.beginFrame(screen());
+            state().keysThisFrame.clear();
+        }
+    }
+
+    // The end of a frame's real-time processing (a match frame): publish what was submitted, start the next frame.
     void onFrameEnd()
     {
         if (!enabled())
             return;
-        ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
-        static uint32_t s_frames = 0;
-        if (++s_frames % 250u == 0u)
-        {
-            const State &s = state();
-            std::fprintf(stderr, "[tmb:native] per 250 frames: %llu chains, %llu objects (%llu not native), %llu strips, %llu triangles, %llu textured batches; matrix col3 (%.1f %.1f %.1f %.1f)\n",
-                         static_cast<unsigned long long>(g_stats.chains), static_cast<unsigned long long>(g_stats.objects),
-                         static_cast<unsigned long long>(g_stats.skipped), static_cast<unsigned long long>(g_stats.strips),
-                         static_cast<unsigned long long>(g_stats.triangles), static_cast<unsigned long long>(g_stats.textured),
-                         s.matrix[12], s.matrix[13], s.matrix[14], s.matrix[15]);
-            g_stats = Stats{};
-        }
-        renderer.endFrame();
-        renderer.beginFrame(screen());
-        state().keysThisFrame.clear();
+        g_vblanksSinceFrameEnd = 0;
+        publish();
+    }
+
+    // Each vblank: the menus (the shell overlay's loop) have no end of real-time processing; there the native frame
+    // is published empty (so the last match frame does not stay over them) once three vblanks went by without one.
+    void onVblank()
+    {
+        if (enabled() && ++g_vblanksSinceFrameEnd >= 3u)
+            publish();
     }
 }
