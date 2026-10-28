@@ -911,7 +911,8 @@ it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf40
 ### Native path state (TMB_NATIVE=1, 2026-10-28)
 The adapter (`runtime/tmb_native.cpp`) reads every VIF1 stream the game sends (the fork's `setVif1Observer`) and
 draws natively, then tells VU1 to skip (`setVu1Gate`): the hier strips (unlit, scaled, directional, point lights),
-sprites (0x3000), ribbons (0x3270) and the effects image's rain (0x1d40). Every other program (the billboard image
+sprites (0x3000) and the effects image's rain (0x1d40). Every other program (the ribbons 0x3270: beams and trails,
+whose translation widened segments sideways and drew a sideways beam as stripes; the billboard image
 3bebca74: 0x390, 0x798, 0xa08, 0x1830, 0x118, 0x1198, 0x2338, 0xcf8, which draws the beacons and headlight halos,
 and the rain's 0x1db8 re-entry) runs on the adapter's own VU1 (the fork's `Vu1Sandbox`, on the adapter's copy of VU1
 memory filled with the fork's `vifUnpack`), its GS packets drawn natively (`GifToNative`); VU1 skips everything.
@@ -925,6 +926,7 @@ PS2 path: the 2D (menus, HUD text and font drawn as GS packets) and the opening 
   same skipped programs (the GS stream's groups) whatever changes in between.
 - `TMB_NATIVE_LOG_VU1=1` counts the programs left on VU1 (with `TMB_NATIVE_SANDBOX=0`), `TMB_NATIVE_DUMP_CODE=<dir>`
   writes their code image, `TMB_NATIVE_HIDE=<pc,...>` has VU1 skip them, drawn by nobody (to see what they are).
+  `TMB_NATIVE_SANDBOX_PCS=<pc,...>` runs translated programs on the sandbox instead (VU1's arithmetic, a reference).
 - `PS2X_NATIVE_VIEW=only` hides the GS frame to look at the native one alone: menus and movies then show only while
   the native frame is empty (the GS frame comes back then); in a match, anything still on the PS2 path is missing.
 - `TMB_NATIVE_VU1=1` keeps VU1 running the native programs too (the GS frame then has everything, for comparison).

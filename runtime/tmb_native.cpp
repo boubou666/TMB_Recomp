@@ -44,7 +44,6 @@ namespace tmb::native
             Directional,
             Point,
             Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
-            Ribbon, // screen-wide quads between two points (trails): 0x3270, one per MSCNT
             Rain,   // the effects image's rain lines (0x1d40)
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
             Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
@@ -59,7 +58,6 @@ namespace tmb::native
             case 0x0ce8: return Mode::Directional;
             case 0x1700: return Mode::Point;
             case 0x3000: return Mode::Sprite;
-            case 0x3270: return Mode::Ribbon;
             case 0x0050:
             case 0x0070: return Mode::SkinDirectional;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
@@ -68,17 +66,18 @@ namespace tmb::native
 
         // The microprograms this adapter draws, recognised by the lower instruction at each entry (so only while their
         // code image is loaded). Setups (and programs that stand alone): the hier image's four strip setups, its two
-        // skinned setups (0x50, 0x70: strips at 0x640), sprites and ribbons, and the effects image's rain. Vertex
-        // passes (0x00 rigid, 0x10 morph, 0x20 / 0x30 / 0x40 skinned with three, two, one bones) run after a setup
-        // and are drawn natively exactly when that setup is: a VU1 setup keeps its VU1 vertex pass. VU1 skips what is
-        // drawn here (and the MSCNTs that continue it); the others still run.
+        // skinned setups (0x50, 0x70: strips at 0x640), sprites, and the effects image's rain. Vertex passes (0x00
+        // rigid, 0x10 morph, 0x20 / 0x30 / 0x40 skinned with three, two, one bones) run after a setup and are drawn
+        // natively exactly when that setup is: a VU1 setup keeps its VU1 vertex pass. VU1 skips what is drawn here
+        // (and the MSCNTs that continue it); the others run on the sandbox, the ribbons among them (0x3270: beams and
+        // trails, each segment widened across it as only VU1's own arithmetic gets right).
         struct Program
         {
             uint32_t pc, lower;
         };
         constexpr Program kSetups[] = {{0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u}, {0x0d08u, 0x420f01dfu},
                                        {0x1700u, 0x420f00a0u}, {0x0050u, 0x420f0376u}, {0x0070u, 0x420f0372u},
-                                       {0x3000u, 0x420f0580u}, {0x3270u, 0x420f0532u}, {0x1d40u, 0x420f07deu}};
+                                       {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}};
         constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
                                              {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
@@ -117,6 +116,26 @@ namespace tmb::native
                 {
                     lastSetupNative = false;
                     return true;
+                }
+            // TMB_NATIVE_SANDBOX_PCS=<pc>[,<pc>...] (hex): programs the adapter translates, run on the sandbox instead
+            // (VU1's own arithmetic: a reference for the translation).
+            static const std::vector<uint32_t> s_sandboxed = []
+            {
+                std::vector<uint32_t> pcs;
+                if (const char *value = std::getenv("TMB_NATIVE_SANDBOX_PCS"))
+                    for (char *end = nullptr; *value; value = *end ? end + 1 : end)
+                    {
+                        pcs.push_back(static_cast<uint32_t>(std::strtoul(value, &end, 16)));
+                        if (end == value)
+                            break;
+                    }
+                return pcs;
+            }();
+            for (uint32_t pc : s_sandboxed)
+                if (pc == startPc)
+                {
+                    lastSetupNative = false;
+                    return false;
                 }
             if (matches(kVertexPasses, vu1Code, startPc))
                 return lastSetupNative;
@@ -225,7 +244,7 @@ namespace tmb::native
         } g_stats;
 
         // The fog factor a microprogram writes in XYZF2's F, over 255: clamp(VU 4.w + VU 21.x + VU 21.w / w, 0, VU 21.y)
-        // (the same in the strip, sprite and ribbon programs; checked on 3000 strip vertices of the match trace).
+        // (the same in the strip and sprite programs; checked on 3000 strip vertices of the match trace).
         float fogFactor(const VuImage &vu, float q)
         {
             return std::min(std::max(vu.f(4, 3) + vu.f(21, 0) + vu.f(21, 3) * q, 0.0f), vu.f(21, 1)) / 255.0f;
@@ -293,7 +312,7 @@ namespace tmb::native
         {
             s.mode = modeForSetup(pc);
             s.setupPc = pc;
-            ps2x::native::Renderer::instance().setKey(0); // sprites and ribbons: screen space, not interpolated
+            ps2x::native::Renderer::instance().setKey(0); // sprites: screen space, not interpolated
             ++g_stats.objects;
             g_stats.skipped += s.mode == Mode::None ? 1u : 0u;
             // M = camera (VU 9-12) x object (VU 0-3): column j of M is camera applied to column j of the object's.
@@ -459,45 +478,6 @@ namespace tmb::native
                 triangles.push_back(quad[i]);
         }
 
-        // One segment of the 0x3270 program (its loop at 0x3290, re-entered at 0x3500): two points (VU top+1 and +4,
-        // the half width in w), each drawn as two vertices 608 pixels per unit of width and of 1/w left and right of
-        // it; vertex k takes its colour from top+2+3k (scaled like the scaled mode) and its texture coordinates from
-        // top+3+3k (4.12, plus VU 4). In screen space like the sprites.
-        void ribbon(State &s, std::vector<ps2x::native::Vertex> &triangles)
-        {
-            ++g_stats.strips;
-            const uint32_t top = s.top;
-            if (!useMaterial(s, top, s.vu.w(top, 3), triangles))
-                return;
-            const VuImage &vu = s.vu;
-            ps2x::native::Vertex quad[4];
-            for (int k = 0; k < 4; ++k)
-            {
-                const uint32_t point = top + 1u + 3u * static_cast<uint32_t>(k / 2);
-                float c[4];
-                for (int j = 0; j < 4; ++j)
-                    c[j] = s.matrix[j] * vu.f(point, 0) + s.matrix[4 + j] * vu.f(point, 1) + s.matrix[8 + j] * vu.f(point, 2) +
-                           s.matrix[12 + j];
-                if (c[3] <= 0.0f)
-                    return; // behind the camera (VU1 clips it)
-                const float q = 1.0f / c[3], half = 608.0f * vu.f(point, 3) * q;
-                quad[k].x = c[0] * q + (k % 2 == 0 ? half : -half);
-                quad[k].y = c[1] * q;
-                quad[k].z = c[2] * q * vu.f(4, 2);
-                const uint32_t colourQw = top + 2u + 3u * static_cast<uint32_t>(k), uvQw = colourQw + 1u;
-                float rgba[4];
-                for (int j = 0; j < 4; ++j)
-                    rgba[j] = static_cast<float>(vu.w(colourQw, j)) * vu.f(5, j) + vu.f(20, j);
-                quad[k].rgba = clampByte(rgba[0]) | (clampByte(rgba[1]) << 8) | (clampByte(rgba[2]) << 16) | (clampByte(rgba[3]) << 24);
-                quad[k].u = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 0))) / 4096.0f + vu.f(4, 0);
-                quad[k].v = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 1))) / 4096.0f + vu.f(4, 1);
-                quad[k].fog = fogFactor(vu, q);
-            }
-            const int order[6] = {0, 1, 2, 1, 2, 3};
-            for (int i : order)
-                triangles.push_back(quad[i]);
-        }
-
         // A skinned strip (0x640): with a texture header, VU memory holds an A+D GIF tag at TOP (the header in its w) and
         // the strip's tag at TOP + 4, else the strip's tag at TOP; vertex k at TOP + 17 + 3k: the pool offset (w), the
         // colour, the texture coordinates (4.12, plus VU 4). Directional light on the pool's blended normal:
@@ -563,9 +543,9 @@ namespace tmb::native
                 skinnedStrip(s, triangles);
                 return;
             }
-            if (s.mode == Mode::Sprite || s.mode == Mode::Ribbon)
+            if (s.mode == Mode::Sprite)
             {
-                (s.mode == Mode::Sprite ? sprite : ribbon)(s, triangles);
+                sprite(s, triangles);
                 return;
             }
             ++g_stats.strips;
@@ -638,7 +618,7 @@ namespace tmb::native
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Ribbon || s.mode == Mode::Rain ? kScreenSpace : s.matrix, triangles.data(),
+            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain ? kScreenSpace : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
             triangles.clear();
         }
