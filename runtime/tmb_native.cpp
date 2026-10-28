@@ -1,34 +1,34 @@
 // Native PC rendering, TMB's adapter (docs/RECOMP_NOTES.md "Native PC port"): TMB's 3D objects read from the game's
 // own data and drawn by the fork's native renderer (ps2x::native::Renderer), without running VU1 code.
 //
-// Each frame `hier` builds a VIF1 DMA chain of its objects and kicks it with hierFlushObjQ. Per object the chain
-// uploads its matrix (VU 0-3), lights (6-8, and 165-175 for the point-light mode), material (150-152: the A+D block
-// with TEX0), texture offset and colour scale (4-5), then starts a setup microprogram (its entry picks the shading
-// mode), its vertex pool (count at 180, positions from 181), the vertex pass, and one MSCNT per strip (a GIF tag and
-// three quadwords per vertex: normal, colour, texture coordinates). The camera and lights common to the frame are a
-// packet the game keeps at 0x2348c0 (VU 9-26). This reads the chain as VIF1 would hand it over and turns each strip
-// into triangles with the formulas the microprograms compute (tools/tmb_mesh_decode.py checks them against VU1).
+// TMB's hier renderer sends its objects to VU1 as VIF1 DMA chains, in batches from several places in its code
+// (hierObjectNode, hierTraverseAsm, hierFlushObjQ). The fork hands every VIF1 stream to this adapter as the game sends
+// it (ps2x::native::setVif1Observer), and the adapter keeps VU1's data memory the way the stream fills it: the
+// frame's camera and lights (VU 9-26), then per object its matrix (VU 0-3), lights (6-8, and 165-175 for the
+// point-light mode), material (150-152: the A+D block with TEX0), texture offset and colour scale (4-5), a setup
+// microprogram start (its entry picks the shading mode), its vertex pool (count at 180, positions from 181), the
+// vertex pass, and one MSCNT per strip (a GIF tag and three quadwords per vertex: normal, colour, texture
+// coordinates). Each strip becomes triangles with the formulas the microprograms compute (tools/tmb_mesh_decode.py
+// checks them against VU1); the frame is published at the end of TMB's real-time processing.
 //
 // TMB_NATIVE=1 turns it on (the GS still draws its own frame under it; PS2X_NATIVE_VIEW=only shows the native one).
 
 #include "ps2_runtime.h"
 #include "runtime/native/native_renderer.h"
+#include "runtime/native/native_vif1.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace tmb::native
 {
     namespace
     {
-        constexpr uint32_t kRamMask = 0x1FFFFFFu;
-        constexpr uint32_t kFramePacket = 0x002348C0u;    // STCYCL + UNPACKs of VU 9-26, refreshed every frame
-        constexpr uint32_t kObjectQueue = 0x004C39E0u;    // hierFlushObjQ's chain addresses
-        constexpr uint32_t kObjectQueueIndex = 0x004C39ECu;
 
         enum class Mode
         {
@@ -81,13 +81,6 @@ namespace tmb::native
         {
             uint64_t chains = 0, objects = 0, strips = 0, triangles = 0, textured = 0, skipped = 0;
         } g_stats;
-
-        uint32_t readWord(const uint8_t *rdram, uint32_t addr)
-        {
-            uint32_t v;
-            std::memcpy(&v, rdram + (addr & kRamMask), 4);
-            return v;
-        }
 
         int32_t signExtend(uint32_t value, uint32_t bits)
         {
@@ -306,53 +299,11 @@ namespace tmb::native
             triangles.clear();
         }
 
-        // The chain's VIF stream: per tag, its two VIF codes then its data (tag transfer on).
-        void readChain(const uint8_t *rdram, uint32_t addr, std::vector<uint32_t> &words)
-        {
-            uint32_t stack[2] = {};
-            int depth = 0;
-            for (int guard = 0; guard < 100000; ++guard)
-            {
-                const uint32_t a = addr & kRamMask;
-                uint64_t lo, hi;
-                std::memcpy(&lo, rdram + a, 8);
-                std::memcpy(&hi, rdram + a + 8, 8);
-                const uint32_t qwc = lo & 0xffffu, id = (lo >> 28) & 7u, ref = (lo >> 32) & 0x7fffffffu;
-                words.push_back(static_cast<uint32_t>(hi));
-                words.push_back(static_cast<uint32_t>(hi >> 32));
-                const uint32_t dataAddr = (id == 0 || id == 3 || id == 4) ? ref : a + 16u;
-                const size_t start = words.size();
-                words.resize(start + qwc * 4u);
-                std::memcpy(words.data() + start, rdram + (dataAddr & kRamMask), qwc * 16u);
-                const uint32_t next = (id == 0 || id == 3 || id == 4) ? a + 16u : a + 16u + qwc * 16u;
-                if (id == 0 || id == 7)
-                    return;
-                if (id == 1 || id == 3 || id == 4)
-                    addr = next;
-                else if (id == 2)
-                    addr = ref;
-                else if (id == 5)
-                {
-                    if (depth < 2)
-                        stack[depth++] = next;
-                    addr = ref;
-                }
-                else if (id == 6)
-                {
-                    if (depth == 0)
-                        return;
-                    addr = stack[--depth];
-                }
-                else
-                    return;
-            }
-        }
-
-        void runVif(State &s, const std::vector<uint32_t> &words)
+        void runVif(State &s, const uint32_t *words, size_t count)
         {
             std::vector<ps2x::native::Vertex> triangles;
             size_t i = 0;
-            while (i < words.size())
+            while (i < count)
             {
                 const uint32_t code = words[i++];
                 const uint32_t cmd = (code >> 24) & 0x7fu, num = (code >> 16) & 0xffu, imm = code & 0xffffu;
@@ -361,7 +312,7 @@ namespace tmb::native
                     const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u, n = num ? num : 256u;
                     const uint32_t bits = vl == 3u ? 16u : (vn + 1u) * (vl == 0 ? 32u : vl == 1 ? 16u : 8u);
                     const size_t size = (static_cast<size_t>(n) * bits + 31u) / 32u;
-                    unpack(s, cmd, num, imm, words.data() + i, std::min(size, words.size() - i));
+                    unpack(s, cmd, num, imm, words + i, std::min(size, count - i));
                     i += size;
                     continue;
                 }
@@ -427,37 +378,22 @@ namespace tmb::native
         return on;
     }
 
-    // hierFlushObjQ, before it kicks the chain: read the objects it holds.
-    void onFlushObjQ(const uint8_t *rdram)
+    namespace
+    {
+        void onVif1(const uint8_t *stream, size_t bytes)
+        {
+            runVif(state(), reinterpret_cast<const uint32_t *>(stream), bytes / 4u);
+            ++g_stats.chains;
+        }
+    }
+
+    void install()
     {
         if (!enabled())
             return;
-        static bool s_started = false;
-        if (!s_started)
-        {
-            ps2x::native::Renderer::instance().setEnabled(true);
-            ps2x::native::Renderer::instance().beginFrame(screen());
-            s_started = true;
-        }
-        const uint32_t index = readWord(rdram, kObjectQueueIndex);
-        const uint32_t chain = readWord(rdram, kObjectQueue + index * 4u) & 0x7fffffffu;
-        if (chain == 0u)
-            return;
-        State &s = state();
-        // The frame's camera and lights, from the packet at 0x2348c0 the game sends before its objects: each block is
-        // STCYCL and UNPACK (two VIF codes) then its quadwords, so the data starts 8 bytes after the block.
-        auto loadBlock = [&](uint32_t block, uint32_t firstQw, uint32_t qwords)
-        {
-            for (uint32_t q = 0; q < qwords; ++q)
-                for (int k = 0; k < 4; ++k)
-                    s.vu.words[(firstQw + q) * 4 + k] = readWord(rdram, block + 8u + q * 16u + k * 4u);
-        };
-        loadBlock(kFramePacket, 9, 4);            // camera to GS screen
-        loadBlock(kFramePacket + 0x90u, 17, 4);   // light colours (17-19), ambient (20)
-        std::vector<uint32_t> words;
-        readChain(rdram, chain, words);
-        runVif(s, words);
-        ++g_stats.chains;
+        ps2x::native::Renderer::instance().setEnabled(true);
+        ps2x::native::Renderer::instance().beginFrame(screen());
+        ps2x::native::setVif1Observer(&onVif1);
     }
 
     // The end of a frame's real-time processing: publish what was submitted, start the next frame.

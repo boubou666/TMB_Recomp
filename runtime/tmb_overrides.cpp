@@ -44,7 +44,7 @@ namespace tmb
 
 namespace tmb::native
 {
-    void onFlushObjQ(const uint8_t *rdram);
+    void install();
     void onFrameEnd();
     bool enabled();
 }
@@ -1196,15 +1196,6 @@ namespace
         }
     }
 
-    // TMB_NATIVE: hierFlushObjQ kicks the VIF1 chain of the frame's objects; read them for the native renderer first.
-    constexpr uint32_t kHierFlushObjQ = 0x001D62C0u;
-
-    void hierFlushObjQOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        tmb::native::onFlushObjQ(rdram);
-        hierFlushObjQ__Fv_0x1d62c0(rdram, ctx, runtime);
-    }
-
     void theGameUpdateOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_theGame = getRegU32(ctx, 4); // TMB_ENEMY_HEALTH_CAP, TMB_KILL_ENEMIES
@@ -1354,8 +1345,7 @@ namespace
         }
         runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
         runtime.registerFunction(kHier, &hierOverride);
-        if (tmb::native::enabled())
-            runtime.registerFunction(kHierFlushObjQ, &hierFlushObjQOverride);
+        tmb::native::install(); // TMB_NATIVE
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);
