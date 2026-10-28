@@ -19,6 +19,7 @@
 #include "runtime/native/native_vu1_sandbox.h"
 #include "runtime/ps2_memory.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -214,6 +215,8 @@ namespace tmb::native
             uint32_t base = 0, offset = 0, tops = 0, top = 0, itops = 0;
             VIFRegisters vif{}; // STMOD, STMASK, STROW / STCOL (and STCYCL, TOPS) for vifUnpack
             std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
+            uint32_t sandboxSetup = 0;                         // the last setup the sandbox ran (statistics)
+            bool setupOnVu1 = false;                           // TMB_NATIVE_VU1_PCS
             Mode mode = Mode::None;
             float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
             std::vector<float> pool;   // x, y, z per pool vertex (the object's space)
@@ -236,6 +239,10 @@ namespace tmb::native
             bool fogged = false;           // the strip's PRIM.FGE
             uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it
             uint32_t batchFogColour = 0;
+            bool depthMasked = false;      // ZBUF_1.ZMSK as the stream's DIRECT packets (or a strip's material) set it
+            bool batchDepthMasked = false;
+            uint64_t test = 0;             // TEST_1 as the stream's DIRECT packets set it (TMB toggles its alpha test)
+            uint64_t batchTest = 0;
         };
 
         struct Stats
@@ -262,10 +269,9 @@ namespace tmb::native
         {
             const VuImage &vu = s.vu;
             float c[4];
-            if (s.mode == Mode::Unlit)
-                for (int k = 0; k < 4; ++k)
-                    c[k] = static_cast<float>(rgba[k]) + vu.f(20, k);
-            else if (s.mode == Mode::Scaled)
+            // The unlit strips (0x10a8) scale their colour by VU 5 too, as the scaled ones (0xf60): colour * vf31 +
+            // vf11. VU 5 is the object's tint (the health bar's green, orange, red).
+            if (s.mode == Mode::Unlit || s.mode == Mode::Scaled)
                 for (int k = 0; k < 4; ++k)
                     c[k] = static_cast<float>(rgba[k]) * vu.f(5, k) + vu.f(20, k);
             else if (s.mode == Mode::Directional)
@@ -404,6 +410,24 @@ namespace tmb::native
         // A strip's or sprite's material: its texture (an A+D block at 149 + header, TEX0 among it, when it brings one)
         // and whether it blends (PRIM.ABE in its GIF tag). A new material ends the batch so far. False when the GIF tag
         // is not an STQ / RGBAQ / XYZF2 one.
+        // TMB_NATIVE_LOG_AD=1: each GS register the stream sets (DIRECT packets, strips' materials), at each new value.
+        void logRegister(const char *where, uint32_t address, uint64_t value)
+        {
+            static const bool s_log = std::getenv("TMB_NATIVE_LOG_AD") != nullptr;
+            if (!s_log)
+                return;
+            static std::unordered_map<uint64_t, uint64_t> s_seen; // where's first letter and address -> value
+            const uint64_t key = (static_cast<uint64_t>(where[0]) << 8) | address;
+            const auto it = s_seen.find(key);
+            if (it != s_seen.end() && it->second == value)
+                return;
+            static uint32_t s_lines = 0;
+            if (++s_lines > 400u)
+                return;
+            s_seen[key] = value;
+            std::fprintf(stderr, "[tmb:native] %s A+D %#x = %#llx\n", where, address, static_cast<unsigned long long>(value));
+        }
+
         bool useMaterial(State &s, uint32_t tagQw, uint32_t header, std::vector<ps2x::native::Vertex> &triangles)
         {
             const uint32_t tag1 = s.vu.w(tagQw, 1), tag2 = s.vu.w(tagQw, 2);
@@ -415,6 +439,9 @@ namespace tmb::native
                 for (uint32_t q = 0; q < 3u; ++q)
                 {
                     const uint32_t qw = 149u + header + q;
+                    logRegister("material", s.vu.w(qw, 2) & 0xffu, static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
+                    if ((s.vu.w(qw, 2) & 0xffu) == 0x4eu) // ZBUF_1
+                        s.depthMasked = (s.vu.w(qw, 1) & 1u) != 0u;
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x06u) // TEX0_1
                     {
                         tex0 = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
@@ -423,7 +450,8 @@ namespace tmb::native
                 }
             const bool blended = ((tag1 >> 15) & 0x40u) != 0u, fogged = ((tag1 >> 15) & 0x20u) != 0u;
             if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended || (blended && s.alpha != s.batchAlpha) ||
-                fogged != s.fogged || (fogged && s.fogColour != s.batchFogColour))
+                fogged != s.fogged || (fogged && s.fogColour != s.batchFogColour) || s.depthMasked != s.batchDepthMasked ||
+                s.test != s.batchTest)
             {
                 flush(s, triangles);
                 s.tex0 = tex0;
@@ -432,6 +460,8 @@ namespace tmb::native
                 s.batchAlpha = s.alpha;
                 s.fogged = fogged;
                 s.batchFogColour = s.fogColour;
+                s.batchDepthMasked = s.depthMasked;
+                s.batchTest = s.test;
             }
             return true;
         }
@@ -614,7 +644,15 @@ namespace tmb::native
             material.textured = s.haveTexture;
             material.tex0 = s.tex0;
             material.blend = s.blended ? blendFor(s.batchAlpha) : ps2x::native::Material::Blend::Opaque;
-            material.depthWrite = s.mode != Mode::Rain;
+            material.depthWrite = s.mode != Mode::Rain && !s.batchDepthMasked;
+            // TEST_1's alpha test (TMB: alpha greater than 0x40, else neither colour nor depth): a sprite's or a strip's
+            // clear texels must not write depth over what is drawn behind it afterwards.
+            const uint32_t atst = (s.batchTest >> 1) & 7u, aref = (s.batchTest >> 4) & 0xffu;
+            if ((s.batchTest & 1u) && (atst == 5u || atst == 6u))
+            {
+                material.alphaTest = atst == 6u || aref > 0u;
+                material.alphaRef = static_cast<uint8_t>(atst == 6u ? aref : aref - 1u);
+            }
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -751,7 +789,12 @@ namespace tmb::native
                             {
                                 const uint64_t value = words[q * 4] | (static_cast<uint64_t>(words[q * 4 + 1]) << 32);
                                 const uint32_t address = words[q * 4 + 2] & 0xffu;
-                                if (address == 0x06u)
+                                logRegister("direct", address, value);
+                                if (address == 0x4eu)
+                                    s.depthMasked = (value >> 32) & 1u;
+                                else if (address == 0x47u)
+                                    s.test = value;
+                                else if (address == 0x06u)
                                     s.directTex0 = value;
                                 else if (address == 0x42u)
                                     s.alpha = value;
@@ -797,6 +840,38 @@ namespace tmb::native
                 {
                     s.top = s.tops;
                     s.tops = s.tops == s.base ? s.base + s.offset : s.base;
+                    // TMB_NATIVE_DUMP_MIRROR=<file>,<pc>: the adapter's copy of VU1 data memory at each MSCAL of that
+                    // program and its MSCNTs (pc, TOP, then 16 KB), to compare with a PS2X_VU1_RECORD trace of VU1.
+                    {
+                        static FILE *s_mirror = nullptr;
+                        static uint32_t s_mirrorPc = ~0u;
+                        static bool s_following = false;
+                        static const bool s_open = [&]
+                        {
+                            const char *value = std::getenv("TMB_NATIVE_DUMP_MIRROR");
+                            if (!value || !*value)
+                                return false;
+                            std::string spec(value);
+                            const size_t comma = spec.rfind(',');
+                            if (comma == std::string::npos)
+                                return false;
+                            s_mirrorPc = static_cast<uint32_t>(std::strtoul(spec.c_str() + comma + 1, nullptr, 16));
+                            s_mirror = std::fopen(spec.substr(0, comma).c_str(), "wb");
+                            return s_mirror != nullptr;
+                        }();
+                        if (s_open)
+                        {
+                            if (cmd != 0x17)
+                                s_following = imm * 8u == s_mirrorPc;
+                            if (s_following)
+                            {
+                                const uint32_t header[2] = {cmd == 0x17 ? 0xffffffffu : imm * 8u, s.top};
+                                std::fwrite(header, sizeof(header), 1, s_mirror);
+                                std::fwrite(s.vu.words, sizeof(s.vu.words), 1, s_mirror);
+                                std::fflush(s_mirror);
+                            }
+                        }
+                    }
                     if (cmd == 0x17 && s.mode == Mode::Sandbox)
                         s.sandbox->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
                     else if (cmd == 0x17)
@@ -805,7 +880,23 @@ namespace tmb::native
                     {
                         const uint32_t pc = imm * 8u;
                         const bool native = decide(s.lastSetupNative, s.code, pc) && inMatch();
-                        const bool sandbox = !native && s.sandbox && inMatch();
+                        // TMB_NATIVE_VU1_PCS=<pc>[,<pc>...] (hex): setups left on the real VU1 (with their vertex passes and
+                        // MSCNTs), the sandbox's reference.
+                        static const std::vector<uint32_t> s_onVu1 = []
+                        {
+                            std::vector<uint32_t> pcs;
+                            if (const char *value = std::getenv("TMB_NATIVE_VU1_PCS"))
+                                for (char *end = nullptr; *value; value = *end ? end + 1 : end)
+                                {
+                                    pcs.push_back(static_cast<uint32_t>(std::strtoul(value, &end, 16)));
+                                    if (end == value)
+                                        break;
+                                }
+                            return pcs;
+                        }();
+                        if (!matches(kVertexPasses, s.code, pc))
+                            s.setupOnVu1 = std::find(s_onVu1.begin(), s_onVu1.end(), pc) != s_onVu1.end();
+                        const bool sandbox = !native && s.sandbox && inMatch() && !s.setupOnVu1;
                         noteDecision(pc, native || sandbox);
                         if (!native)
                         {
@@ -817,6 +908,9 @@ namespace tmb::native
                                 ps2x::native::Renderer::instance().beginGroup(++s.group);
                                 ps2x::native::Renderer::instance().setKey(0);
                                 s.mode = Mode::Sandbox;
+                                if (!matches(kVertexPasses, s.code, pc))
+                                    s.sandboxSetup = pc;
+                                s.sandbox->gif().setSource((s.sandboxSetup << 16) | pc); // its setup and itself
                                 s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
                                                 s.top, s.itops);
                             }

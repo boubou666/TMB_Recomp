@@ -914,7 +914,7 @@ draws natively, then tells VU1 to skip (`setVu1Gate`): the hier strips (unlit, s
 sprites (0x3000) and the effects image's rain (0x1d40). Every other program (the ribbons 0x3270: beams and trails,
 whose translation widened segments sideways and drew a sideways beam as stripes; the billboard image
 3bebca74: 0x390, 0x798, 0xa08, 0x1830, 0x118, 0x1198, 0x2338, 0xcf8, which draws the beacons and headlight halos,
-and the rain's 0x1db8 re-entry) runs on the adapter's own VU1 (the fork's `Vu1Sandbox`, on the adapter's copy of VU1
+and the hier image's environment-mapped setup 0x1db8) runs on the adapter's own VU1 (the fork's `Vu1Sandbox`, on the adapter's copy of VU1
 memory filled with the fork's `vifUnpack`), its GS packets drawn natively (`GifToNative`); VU1 skips everything.
 Before that, those were drawn by the GS under the native frame: with paraLLEl-GS the native 3D covered the beacons
 and showed through what they drew (a see-through building). `TMB_NATIVE_SANDBOX=0` leaves them on VU1. Still on the
@@ -927,6 +927,13 @@ PS2 path: the 2D (menus, HUD text and font drawn as GS packets) and the opening 
 - `TMB_NATIVE_LOG_VU1=1` counts the programs left on VU1 (with `TMB_NATIVE_SANDBOX=0`), `TMB_NATIVE_DUMP_CODE=<dir>`
   writes their code image, `TMB_NATIVE_HIDE=<pc,...>` has VU1 skip them, drawn by nobody (to see what they are).
   `TMB_NATIVE_SANDBOX_PCS=<pc,...>` runs translated programs on the sandbox instead (VU1's arithmetic, a reference).
+- The unlit strips (0x10a8, after setup 0xcc8) scale their colour by VU 5 like the scaled ones (colour * vf31 + vf11):
+  VU 5 is the object's tint, and without it the health bar was white instead of green / yellow / red.
+- TEST_1 from DIRECT is applied to the native batches: TMB toggles an alpha test (alpha above 0x40, else neither colour
+  nor depth), without which a glow's clear corners wrote depth over the effects drawn behind it afterwards.
+- `TMB_NATIVE_VU1_PCS=<pc,...>` leaves setups on VU1; `TMB_NATIVE_LOG_AD=1` logs the GS registers the stream sets;
+  `TMB_NATIVE_DUMP_MIRROR=<file>,<pc>` dumps the adapter's VU memory at a program's runs. 0x1db8 is the hier image's
+  environment-mapped strip setup (not the rain's), now on the sandbox.
 - `PS2X_NATIVE_VIEW=only` hides the GS frame to look at the native one alone: menus and movies then show only while
   the native frame is empty (the GS frame comes back then); in a match, anything still on the PS2 path is missing.
 - `TMB_NATIVE_VU1=1` keeps VU1 running the native programs too (the GS frame then has everything, for comparison).
