@@ -93,6 +93,25 @@ namespace tmb::native
         // over the same MSCALs in the same order.
         bool decide(bool &lastSetupNative, const uint8_t *vu1Code, uint32_t startPc)
         {
+            // TMB_NATIVE_HIDE=<pc>[,<pc>...] (hex): VU1 skips those programs and nothing draws them (to see what they are).
+            static const std::vector<uint32_t> s_hidden = []
+            {
+                std::vector<uint32_t> pcs;
+                if (const char *value = std::getenv("TMB_NATIVE_HIDE"))
+                    for (char *end = nullptr; *value; value = *end ? end + 1 : end)
+                    {
+                        pcs.push_back(static_cast<uint32_t>(std::strtoul(value, &end, 16)));
+                        if (end == value)
+                            break;
+                    }
+                return pcs;
+            }();
+            for (uint32_t pc : s_hidden)
+                if (pc == startPc)
+                {
+                    lastSetupNative = false;
+                    return true;
+                }
             if (matches(kVertexPasses, vu1Code, startPc))
                 return lastSetupNative;
             lastSetupNative = matches(kSetups, vu1Code, startPc);
@@ -808,6 +827,31 @@ namespace tmb::native
                                 s.mode = Mode::None; // another program, or another code image's: still on VU1
                                 ++g_stats.objects;
                                 ++g_stats.skipped;
+                                static const bool s_logVu1 = std::getenv("TMB_NATIVE_LOG_VU1") != nullptr;
+                                if (s_logVu1)
+                                {
+                                    static std::unordered_map<uint64_t, uint32_t> s_counts;
+                                    uint32_t lower = 0;
+                                    if (pc + 8u <= sizeof(s.code))
+                                        std::memcpy(&lower, s.code + pc, 4);
+                                    const uint64_t key = (static_cast<uint64_t>(pc) << 32) | lower;
+                                    // TMB_NATIVE_DUMP_CODE=<dir>: the code image of each program's first call, as
+                                    // <dir>/vu1_<pc>.bin (for tools/vu_disasm.py).
+                                    static const char *s_dumpDir = std::getenv("TMB_NATIVE_DUMP_CODE");
+                                    if (s_dumpDir && s_counts[key] == 0u)
+                                    {
+                                        char path[1024];
+                                        std::snprintf(path, sizeof(path), "%s/vu1_%04x.bin", s_dumpDir, pc);
+                                        if (FILE *file = std::fopen(path, "wb"))
+                                        {
+                                            std::fwrite(s.code, 1, sizeof(s.code), file);
+                                            std::fclose(file);
+                                        }
+                                    }
+                                    if (++s_counts[key] % 2000u == 1u)
+                                        std::fprintf(stderr, "[tmb:native] on VU1: %#x (lower %#x) x%u, last setup %s\n", pc, lower,
+                                                     s_counts[key], s.lastSetupNative ? "native" : "VU1");
+                                }
                             }
                         }
                         else
