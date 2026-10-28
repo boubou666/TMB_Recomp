@@ -37,6 +37,8 @@ namespace tmb::native
             Scaled,
             Directional,
             Point,
+            Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
+            Ribbon, // screen-wide quads between two points (trails): 0x3270, one per MSCNT
         };
 
         Mode modeForSetup(uint32_t pc)
@@ -47,7 +49,9 @@ namespace tmb::native
             case 0x0d08: return Mode::Scaled;
             case 0x0ce8: return Mode::Directional;
             case 0x1700: return Mode::Point;
-            default: return Mode::None; // other programs (particles, shadows at 0x3000..): not native yet
+            case 0x3000: return Mode::Sprite;
+            case 0x3270: return Mode::Ribbon;
+            default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
             }
         }
 
@@ -217,17 +221,14 @@ namespace tmb::native
 
         void flush(State &s, std::vector<ps2x::native::Vertex> &triangles);
 
-        void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        // A strip's or sprite's material: its texture (an A+D block at 149 + header, TEX0 among it, when it brings one)
+        // and whether it blends (PRIM.ABE in its GIF tag). A new material ends the batch so far. False when the GIF tag
+        // is not an STQ / RGBAQ / XYZF2 one.
+        bool useMaterial(State &s, uint32_t top, std::vector<ps2x::native::Vertex> &triangles)
         {
-            if (s.mode == Mode::None)
-                return;
-            ++g_stats.strips;
-            const uint32_t top = s.top;
-            const uint32_t tag0 = s.vu.w(top, 0), tag1 = s.vu.w(top, 1), tag2 = s.vu.w(top, 2);
+            const uint32_t tag1 = s.vu.w(top, 1), tag2 = s.vu.w(top, 2);
             if (tag2 != 0x412u)
-                return; // not an STQ / RGBAQ / XYZF2 strip
-            // The strip's material: its texture (an A+D block at 149 + header, TEX0 among it, when it brings one) and
-            // whether it blends (PRIM.ABE in the GIF tag). A new material ends the batch so far.
+                return false;
             uint64_t tex0 = s.tex0;
             bool textured = s.haveTexture;
             const uint32_t header = s.vu.w(top, 3);
@@ -249,6 +250,102 @@ namespace tmb::native
                 s.haveTexture = textured;
                 s.blended = blended;
             }
+            return true;
+        }
+
+        // One sprite of the 0x3000 program (its loop at 0x3030, re-entered at 0x3260): a centre (VU top+1, the size in
+        // w), a colour (top+2, scaled like the scaled mode) and four corners' texture coordinates (top+3..6, 4.12). The
+        // centre goes to the screen as (M * p) / w; the quad around it is 608 x 304 pixels per unit of size and of 1/w
+        // (square on TMB's 640 x 256 field), corners (+x -y), (-x -y), (+x +y), (-x +y). Its vertices are in screen
+        // space, drawn with an identity matrix.
+        void sprite(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const uint32_t top = s.top;
+            if (!useMaterial(s, top, triangles))
+                return;
+            const VuImage &vu = s.vu;
+            const float p[3] = {vu.f(top + 1, 0), vu.f(top + 1, 1), vu.f(top + 1, 2)}, size = vu.f(top + 1, 3);
+            float c[4];
+            for (int k = 0; k < 4; ++k)
+                c[k] = s.matrix[k] * p[0] + s.matrix[4 + k] * p[1] + s.matrix[8 + k] * p[2] + s.matrix[12 + k];
+            if (c[3] <= 0.0f)
+                return; // behind the camera (VU1 culls it by its clip test)
+            const float q = 1.0f / c[3];
+            const float x = c[0] * q, y = c[1] * q, z = c[2] * q * vu.f(4, 2);
+            const float hx = 608.0f * size * q, hy = 304.0f * size * q;
+            float rgba[4];
+            for (int k = 0; k < 4; ++k)
+                rgba[k] = static_cast<float>(vu.w(top + 2, k)) * vu.f(5, k) + vu.f(20, k);
+            const uint32_t colour = clampByte(rgba[0]) | (clampByte(rgba[1]) << 8) | (clampByte(rgba[2]) << 16) | (clampByte(rgba[3]) << 24);
+            const float corner[4][2] = {{x + hx, y - hy}, {x - hx, y - hy}, {x + hx, y + hy}, {x - hx, y + hy}};
+            ps2x::native::Vertex quad[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                quad[i].x = corner[i][0];
+                quad[i].y = corner[i][1];
+                quad[i].z = z;
+                quad[i].u = static_cast<float>(static_cast<int32_t>(vu.w(top + 3 + i, 0))) / 4096.0f;
+                quad[i].v = static_cast<float>(static_cast<int32_t>(vu.w(top + 3 + i, 1))) / 4096.0f;
+                quad[i].rgba = colour;
+            }
+            const int order[6] = {0, 1, 2, 1, 2, 3};
+            for (int i : order)
+                triangles.push_back(quad[i]);
+        }
+
+        // One segment of the 0x3270 program (its loop at 0x3290, re-entered at 0x3500): two points (VU top+1 and +4,
+        // the half width in w), each drawn as two vertices 608 pixels per unit of width and of 1/w left and right of
+        // it; vertex k takes its colour from top+2+3k (scaled like the scaled mode) and its texture coordinates from
+        // top+3+3k (4.12, plus VU 4). In screen space like the sprites.
+        void ribbon(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const uint32_t top = s.top;
+            if (!useMaterial(s, top, triangles))
+                return;
+            const VuImage &vu = s.vu;
+            ps2x::native::Vertex quad[4];
+            for (int k = 0; k < 4; ++k)
+            {
+                const uint32_t point = top + 1u + 3u * static_cast<uint32_t>(k / 2);
+                float c[4];
+                for (int j = 0; j < 4; ++j)
+                    c[j] = s.matrix[j] * vu.f(point, 0) + s.matrix[4 + j] * vu.f(point, 1) + s.matrix[8 + j] * vu.f(point, 2) +
+                           s.matrix[12 + j];
+                if (c[3] <= 0.0f)
+                    return; // behind the camera (VU1 clips it)
+                const float q = 1.0f / c[3], half = 608.0f * vu.f(point, 3) * q;
+                quad[k].x = c[0] * q + (k % 2 == 0 ? half : -half);
+                quad[k].y = c[1] * q;
+                quad[k].z = c[2] * q * vu.f(4, 2);
+                const uint32_t colourQw = top + 2u + 3u * static_cast<uint32_t>(k), uvQw = colourQw + 1u;
+                float rgba[4];
+                for (int j = 0; j < 4; ++j)
+                    rgba[j] = static_cast<float>(vu.w(colourQw, j)) * vu.f(5, j) + vu.f(20, j);
+                quad[k].rgba = clampByte(rgba[0]) | (clampByte(rgba[1]) << 8) | (clampByte(rgba[2]) << 16) | (clampByte(rgba[3]) << 24);
+                quad[k].u = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 0))) / 4096.0f + vu.f(4, 0);
+                quad[k].v = static_cast<float>(static_cast<int32_t>(vu.w(uvQw, 1))) / 4096.0f + vu.f(4, 1);
+            }
+            const int order[6] = {0, 1, 2, 1, 2, 3};
+            for (int i : order)
+                triangles.push_back(quad[i]);
+        }
+
+        void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            if (s.mode == Mode::None)
+                return;
+            if (s.mode == Mode::Sprite || s.mode == Mode::Ribbon)
+            {
+                (s.mode == Mode::Sprite ? sprite : ribbon)(s, triangles);
+                return;
+            }
+            ++g_stats.strips;
+            const uint32_t top = s.top;
+            const uint32_t tag0 = s.vu.w(top, 0);
+            if (!useMaterial(s, top, triangles))
+                return;
             const uint32_t nloop = tag0 & 0x7fffu;
             const float uOffset = s.vu.f(4, 0), vOffset = s.vu.f(4, 1);
             std::vector<ps2x::native::Vertex> strip;
@@ -295,7 +392,9 @@ namespace tmb::native
             material.textured = s.haveTexture;
             material.tex0 = s.tex0;
             material.blend = s.blended ? ps2x::native::Material::Blend::Alpha : ps2x::native::Material::Blend::Opaque;
-            ps2x::native::Renderer::instance().draw(material, s.matrix, triangles.data(), static_cast<uint32_t>(triangles.size()));
+            static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Ribbon ? kScreenSpace : s.matrix, triangles.data(),
+                                                    static_cast<uint32_t>(triangles.size()));
             triangles.clear();
         }
 
@@ -387,12 +486,13 @@ namespace tmb::native
         }
 
         // The hier microprograms this adapter draws, recognised by the lower instruction at each entry: the vertex
-        // pass and the four setups. VU1 skips them (and the strips that continue them); the others still run.
+        // pass, the four strip setups, the sprites' and the ribbons'. VU1 skips them (and the strips that continue them); the others still run.
         constexpr struct
         {
             uint32_t pc, lower;
         } kNativePrograms[] = {{0x0000u, 0x400001d4u}, {0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u},
-                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}};
+                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}, {0x3000u, 0x420f0580u},
+                               {0x3270u, 0x420f0532u}};
 
         bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
         {
