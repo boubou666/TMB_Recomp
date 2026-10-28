@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace tmb::native
@@ -135,6 +136,10 @@ namespace tmb::native
             // A skinned pass's pool: 3 quadwords per vertex, the strips index it by quadword offset (181 + offset);
             // per offset / 3, the blended position and normal.
             std::vector<float> skinPositions, skinNormals;
+            uint32_t setupPc = 0;
+            // Objects keyed this frame (Renderer::setKey): their own data's hash -> how many so far, so identical
+            // objects (two of the same barrel) keep their own key, by their order.
+            std::unordered_map<uint64_t, uint32_t> keysThisFrame;
             uint64_t alpha = 0x44;         // ALPHA_1 as the stream's DIRECT packets set it (how blended draws blend)
             uint64_t batchAlpha = 0x44;    // the ALPHA_1 of the batch being built
             bool fogged = false;           // the strip's PRIM.FGE
@@ -268,6 +273,8 @@ namespace tmb::native
         void setup(State &s, uint32_t pc)
         {
             s.mode = modeForSetup(pc);
+            s.setupPc = pc;
+            ps2x::native::Renderer::instance().setKey(0); // sprites and ribbons: screen space, not interpolated
             ++g_stats.objects;
             g_stats.skipped += s.mode == Mode::None ? 1u : 0u;
             // M = camera (VU 9-12) x object (VU 0-3): column j of M is camera applied to column j of the object's.
@@ -276,6 +283,22 @@ namespace tmb::native
                     s.matrix[j * 4 + k] = s.vu.f(9, k) * s.vu.f(j, 0) + s.vu.f(10, k) * s.vu.f(j, 1) +
                                           s.vu.f(11, k) * s.vu.f(j, 2) + s.vu.f(12, k) * s.vu.f(j, 3);
             s.haveTexture = false;
+        }
+
+        // An object's key for interpolation (Renderer::setKey): its setup, its vertex count and its pool's words as
+        // the stream brought them (object space, so the same from one frame to the next, a skinned one's bind pose
+        // too), with how many objects had that hash before it this frame.
+        void keyObject(State &s, uint32_t count, uint32_t qwords)
+        {
+            uint64_t hash = 1469598103934665603ull ^ (static_cast<uint64_t>(s.setupPc) << 32) ^ count;
+            const uint32_t words = std::min(qwords, 64u) * 4u;
+            for (uint32_t i = 0; i < words; ++i)
+            {
+                hash ^= s.vu.words[181u * 4u + i];
+                hash *= 1099511628211ull;
+            }
+            const uint32_t occurrence = s.keysThisFrame[hash]++;
+            ps2x::native::Renderer::instance().setKey((hash ^ (static_cast<uint64_t>(occurrence) * 0x9e3779b97f4a7c15ull)) | 1u);
         }
 
         // The skinned vertex passes (0x20 / 0x30 / 0x40 -> 0xd0 / 0x2f8 / 0x4d0): pool vertex i is 3 quadwords at
@@ -287,6 +310,7 @@ namespace tmb::native
         {
             const VuImage &vu = s.vu;
             const uint32_t count = vu.w(180, 3) & 0xffffu;
+            keyObject(s, count, count * 3u);
             s.skinPositions.assign(static_cast<size_t>(count) * 3u, 0.0f);
             s.skinNormals.assign(static_cast<size_t>(count) * 3u, 0.0f);
             float weightScale;
@@ -320,6 +344,7 @@ namespace tmb::native
         {
             const VuImage &vu = s.vu;
             const uint32_t count = vu.w(180, 3) & 0xffffu;
+            keyObject(s, count, count);
             s.pool.resize(static_cast<size_t>(count) * 3u);
             for (uint32_t i = 0; i < count; ++i)
                 for (int k = 0; k < 3; ++k)
@@ -329,6 +354,7 @@ namespace tmb::native
         void vertexPass(State &s)
         {
             const uint32_t count = s.vu.w(180, 3) & 0xffffu;
+            keyObject(s, count, count);
             s.pool.resize(static_cast<size_t>(count) * 3u);
             for (uint32_t i = 0; i < count; ++i)
                 for (int k = 0; k < 3; ++k)
@@ -610,6 +636,7 @@ namespace tmb::native
         void rain(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             flush(s, triangles);
+            ps2x::native::Renderer::instance().setKey(0);
             const VuImage &vu = s.vu;
             s.mode = Mode::Rain;
             s.tex0 = s.directTex0;
@@ -878,5 +905,6 @@ namespace tmb::native
         }
         renderer.endFrame();
         renderer.beginFrame(screen());
+        state().keysThisFrame.clear();
     }
 }
