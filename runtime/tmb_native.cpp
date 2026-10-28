@@ -385,6 +385,26 @@ namespace tmb::native
             runVif(state(), reinterpret_cast<const uint32_t *>(stream), bytes / 4u);
             ++g_stats.chains;
         }
+
+        // The hier microprograms this adapter draws, recognised by the lower instruction at each entry: the vertex
+        // pass and the four setups. VU1 skips them (and the strips that continue them); the others still run.
+        constexpr struct
+        {
+            uint32_t pc, lower;
+        } kNativePrograms[] = {{0x0000u, 0x400001d4u}, {0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u},
+                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}};
+
+        bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
+        {
+            for (const auto &program : kNativePrograms)
+                if (program.pc == startPc)
+                {
+                    uint32_t lower;
+                    std::memcpy(&lower, vu1Code + startPc, 4);
+                    return lower == program.lower;
+                }
+            return false;
+        }
     }
 
     void install()
@@ -394,6 +414,9 @@ namespace tmb::native
         ps2x::native::Renderer::instance().setEnabled(true);
         ps2x::native::Renderer::instance().beginFrame(screen());
         ps2x::native::setVif1Observer(&onVif1);
+        // TMB_NATIVE_VU1=1 keeps VU1 running them too (to compare with the GS frame).
+        if (const char *keep = std::getenv("TMB_NATIVE_VU1"); !(keep && *keep == '1'))
+            ps2x::native::setVu1Gate(&drawnNatively);
     }
 
     // The end of a frame's real-time processing: publish what was submitted, start the next frame.
