@@ -40,6 +40,7 @@ namespace tmb::native
             Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
             Ribbon, // screen-wide quads between two points (trails): 0x3270, one per MSCNT
             Rain,   // the effects image's rain lines (0x1d40)
+            SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
         };
 
         Mode modeForSetup(uint32_t pc)
@@ -52,23 +53,32 @@ namespace tmb::native
             case 0x1700: return Mode::Point;
             case 0x3000: return Mode::Sprite;
             case 0x3270: return Mode::Ribbon;
+            case 0x0050:
+            case 0x0070: return Mode::SkinDirectional;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
             }
         }
 
         // The microprograms this adapter draws, recognised by the lower instruction at each entry (so only while their
-        // code image is loaded): the hier image's vertex pass, four strip setups, sprites and ribbons, and the effects
-        // image's rain. VU1 skips them (and the MSCNTs that continue them); the others still run.
-        constexpr struct
+        // code image is loaded). Setups (and programs that stand alone): the hier image's four strip setups, its two
+        // skinned setups (0x50, 0x70: strips at 0x640), sprites and ribbons, and the effects image's rain. Vertex
+        // passes (0x00 rigid, 0x10 morph, 0x20 / 0x30 / 0x40 skinned with three, two, one bones) run after a setup
+        // and are drawn natively exactly when that setup is: a VU1 setup keeps its VU1 vertex pass. VU1 skips what is
+        // drawn here (and the MSCNTs that continue it); the others still run.
+        struct Program
         {
             uint32_t pc, lower;
-        } kNativePrograms[] = {{0x0000u, 0x400001d4u}, {0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u},
-                               {0x0d08u, 0x420f01dfu}, {0x1700u, 0x420f00a0u}, {0x3000u, 0x420f0580u},
-                               {0x3270u, 0x420f0532u}, {0x1d40u, 0x420f07deu}};
+        };
+        constexpr Program kSetups[] = {{0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u}, {0x0d08u, 0x420f01dfu},
+                                       {0x1700u, 0x420f00a0u}, {0x0050u, 0x420f0376u}, {0x0070u, 0x420f0372u},
+                                       {0x3000u, 0x420f0580u}, {0x3270u, 0x420f0532u}, {0x1d40u, 0x420f07deu}};
+        constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
+                                             {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
-        bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
+        template <size_t N>
+        bool matches(const Program (&programs)[N], const uint8_t *vu1Code, uint32_t startPc)
         {
-            for (const auto &program : kNativePrograms)
+            for (const Program &program : programs)
                 if (program.pc == startPc)
                 {
                     uint32_t lower;
@@ -76,6 +86,22 @@ namespace tmb::native
                     return lower == program.lower;
                 }
             return false;
+        }
+
+        // The same decision on the VIF1 thread (the gate) and in the adapter (the stream), each with its own state,
+        // over the same MSCALs in the same order.
+        bool decide(bool &lastSetupNative, const uint8_t *vu1Code, uint32_t startPc)
+        {
+            if (matches(kVertexPasses, vu1Code, startPc))
+                return lastSetupNative;
+            lastSetupNative = matches(kSetups, vu1Code, startPc);
+            return lastSetupNative;
+        }
+
+        bool drawnNatively(const uint8_t *vu1Code, uint32_t startPc)
+        {
+            static bool s_lastSetupNative = false; // the VIF1 thread's
+            return decide(s_lastSetupNative, vu1Code, startPc);
         }
 
         // VU1 data memory as the chain fills it: 1024 quadwords, read as words or floats.
@@ -104,6 +130,11 @@ namespace tmb::native
             bool blended = false; // the strip's PRIM.ABE
             uint8_t code[16 * 1024] = {}; // VU1 micro memory as the stream's MPGs fill it
             uint64_t directTex0 = 0;       // the last TEX0_1 the stream's DIRECT packets set (the rain's texture)
+            uint64_t group = 0;            // the natively drawn programs so far (Renderer::beginGroup)
+            bool lastSetupNative = false;  // decide()'s state for the stream
+            // A skinned pass's pool: 3 quadwords per vertex, the strips index it by quadword offset (181 + offset);
+            // per offset / 3, the blended position and normal.
+            std::vector<float> skinPositions, skinNormals;
             uint64_t alpha = 0x44;         // ALPHA_1 as the stream's DIRECT packets set it (how blended draws blend)
             uint64_t batchAlpha = 0x44;    // the ALPHA_1 of the batch being built
             bool fogged = false;           // the strip's PRIM.FGE
@@ -247,6 +278,54 @@ namespace tmb::native
             s.haveTexture = false;
         }
 
+        // The skinned vertex passes (0x20 / 0x30 / 0x40 -> 0xd0 / 0x2f8 / 0x4d0): pool vertex i is 3 quadwords at
+        // 181 + 3i: the position (weight 0 in w), the normal as bytes (n = 1 - v / 128; bone 0's offset in w), then
+        // weight 1, bone 1, weight 2, bone 2 (x, y, z, w; two bones: x, y). A bone is 4 quadwords at TOP + its offset;
+        // position and normal are the weighted sums of the bones' transforms (weights / 65536, one bone: unweighted).
+        // Checked on 3171 vertices of a recorded two-bone pass (VU1's blended position and normal, within 1e-5).
+        void skinnedPass(State &s, int bones)
+        {
+            const VuImage &vu = s.vu;
+            const uint32_t count = vu.w(180, 3) & 0xffffu;
+            s.skinPositions.assign(static_cast<size_t>(count) * 3u, 0.0f);
+            s.skinNormals.assign(static_cast<size_t>(count) * 3u, 0.0f);
+            float weightScale;
+            const uint32_t weightBits = 0x377ffff6u; // the program's 1/65536
+            std::memcpy(&weightScale, &weightBits, 4);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t b = 181u + 3u * i;
+                const float p[3] = {vu.f(b, 0), vu.f(b, 1), vu.f(b, 2)};
+                const float n[3] = {1.0f - static_cast<float>(vu.w(b + 1, 0)) / 128.0f, 1.0f - static_cast<float>(vu.w(b + 1, 1)) / 128.0f,
+                                    1.0f - static_cast<float>(vu.w(b + 1, 2)) / 128.0f};
+                const uint32_t offset[3] = {vu.w(b + 1, 3), vu.w(b + 2, 1), vu.w(b + 2, 3)};
+                const float weight[3] = {bones == 1 ? 1.0f : static_cast<float>(static_cast<int32_t>(vu.w(b, 3))) * weightScale,
+                                         static_cast<float>(static_cast<int32_t>(vu.w(b + 2, 0))) * weightScale,
+                                         static_cast<float>(static_cast<int32_t>(vu.w(b + 2, 2))) * weightScale};
+                float *outP = &s.skinPositions[i * 3u], *outN = &s.skinNormals[i * 3u];
+                for (int bone = 0; bone < bones; ++bone)
+                {
+                    const uint32_t m = s.top + (offset[bone] & 0x3ffu);
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        outP[k] += (vu.f(m, k) * p[0] + vu.f(m + 1, k) * p[1] + vu.f(m + 2, k) * p[2] + vu.f(m + 3, k)) * weight[bone];
+                        outN[k] += (vu.f(m, k) * n[0] + vu.f(m + 1, k) * n[1] + vu.f(m + 2, k) * n[2]) * weight[bone];
+                    }
+                }
+            }
+        }
+
+        // The morph pass (0x10 -> 0xd88): pool vertex i at 181 + i moved by its delta at 373 + i times VU 31.
+        void morphPass(State &s)
+        {
+            const VuImage &vu = s.vu;
+            const uint32_t count = vu.w(180, 3) & 0xffffu;
+            s.pool.resize(static_cast<size_t>(count) * 3u);
+            for (uint32_t i = 0; i < count; ++i)
+                for (int k = 0; k < 3; ++k)
+                    s.pool[i * 3u + k] = vu.f(181 + i, k) + vu.f(373 + i, k) * vu.f(31, k);
+        }
+
         void vertexPass(State &s)
         {
             const uint32_t count = s.vu.w(180, 3) & 0xffffu;
@@ -261,14 +340,13 @@ namespace tmb::native
         // A strip's or sprite's material: its texture (an A+D block at 149 + header, TEX0 among it, when it brings one)
         // and whether it blends (PRIM.ABE in its GIF tag). A new material ends the batch so far. False when the GIF tag
         // is not an STQ / RGBAQ / XYZF2 one.
-        bool useMaterial(State &s, uint32_t top, std::vector<ps2x::native::Vertex> &triangles)
+        bool useMaterial(State &s, uint32_t tagQw, uint32_t header, std::vector<ps2x::native::Vertex> &triangles)
         {
-            const uint32_t tag1 = s.vu.w(top, 1), tag2 = s.vu.w(top, 2);
+            const uint32_t tag1 = s.vu.w(tagQw, 1), tag2 = s.vu.w(tagQw, 2);
             if (tag2 != 0x412u)
                 return false;
             uint64_t tex0 = s.tex0;
             bool textured = s.haveTexture;
-            const uint32_t header = s.vu.w(top, 3);
             if (header != 0u)
                 for (uint32_t q = 0; q < 3u; ++q)
                 {
@@ -303,7 +381,7 @@ namespace tmb::native
         {
             ++g_stats.strips;
             const uint32_t top = s.top;
-            if (!useMaterial(s, top, triangles))
+            if (!useMaterial(s, top, s.vu.w(top, 3), triangles))
                 return;
             const VuImage &vu = s.vu;
             const float p[3] = {vu.f(top + 1, 0), vu.f(top + 1, 1), vu.f(top + 1, 2)}, size = vu.f(top + 1, 3);
@@ -344,7 +422,7 @@ namespace tmb::native
         {
             ++g_stats.strips;
             const uint32_t top = s.top;
-            if (!useMaterial(s, top, triangles))
+            if (!useMaterial(s, top, s.vu.w(top, 3), triangles))
                 return;
             const VuImage &vu = s.vu;
             ps2x::native::Vertex quad[4];
@@ -375,10 +453,71 @@ namespace tmb::native
                 triangles.push_back(quad[i]);
         }
 
+        // A skinned strip (0x640): with a texture header, VU memory holds an A+D GIF tag at TOP (the header in its w) and
+        // the strip's tag at TOP + 4, else the strip's tag at TOP; vertex k at TOP + 17 + 3k: the pool offset (w), the
+        // colour, the texture coordinates (4.12, plus VU 4). Directional light on the pool's blended normal:
+        // colour * (VU 17-19 . max(0, VU 6-8 . n)) * VU 5 + VU 20. All 4005 checked vertices of the recorded match
+        // (colour, screen position, texture coordinates) match VU1.
+        void skinnedStrip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            const uint32_t header = vu.w(top, 3);
+            const uint32_t tagQw = header != 0u ? top + 4u : top;
+            if (!useMaterial(s, tagQw, header, triangles))
+                return;
+            const uint32_t nloop = vu.w(tagQw, 0) & 0x7fffu;
+            std::vector<ps2x::native::Vertex> strip;
+            strip.reserve(nloop);
+            for (uint32_t k = 0; k < nloop; ++k)
+            {
+                const uint32_t q = top + 17u + 3u * k;
+                const uint32_t offset = vu.w(q, 3) & 0x7fffu;
+                ps2x::native::Vertex out;
+                if (offset % 3u != 0u || static_cast<size_t>(offset) + 2u >= s.skinPositions.size())
+                {
+                    out.rgba = 0xdeadu; // a break, as in strip()
+                    strip.push_back(out);
+                    continue;
+                }
+                const float *pos = &s.skinPositions[offset], *n = &s.skinNormals[offset];
+                out.x = pos[0];
+                out.y = pos[1];
+                out.z = pos[2];
+                float d[3], c[4];
+                for (int i = 0; i < 3; ++i)
+                    d[i] = std::max(0.0f, vu.f(6, i) * n[0] + vu.f(7, i) * n[1] + vu.f(8, i) * n[2]);
+                for (int k2 = 0; k2 < 3; ++k2)
+                    c[k2] = static_cast<float>(vu.w(q + 1, k2)) * (vu.f(17, k2) * d[0] + vu.f(18, k2) * d[1] + vu.f(19, k2) * d[2]) * vu.f(5, k2) +
+                            vu.f(20, k2);
+                c[3] = static_cast<float>(vu.w(q + 1, 3)) * vu.f(5, 3) + vu.f(20, 3);
+                out.rgba = clampByte(c[0]) | (clampByte(c[1]) << 8) | (clampByte(c[2]) << 16) | (clampByte(c[3]) << 24);
+                out.u = static_cast<float>(static_cast<int32_t>(vu.w(q + 2, 0))) / 4096.0f + vu.f(4, 0);
+                out.v = static_cast<float>(static_cast<int32_t>(vu.w(q + 2, 1))) / 4096.0f + vu.f(4, 1);
+                const float w = s.matrix[3] * pos[0] + s.matrix[7] * pos[1] + s.matrix[11] * pos[2] + s.matrix[15];
+                out.fog = w > 0.0f ? fogFactor(vu, 1.0f / w) : 0.0f;
+                strip.push_back(out);
+            }
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                if (strip[i].rgba == 0xdeadu || strip[i - 1].rgba == 0xdeadu || strip[i - 2].rgba == 0xdeadu)
+                    continue;
+                triangles.push_back(strip[i - 2]);
+                triangles.push_back(strip[i - 1]);
+                triangles.push_back(strip[i]);
+            }
+        }
+
         void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             if (s.mode == Mode::None)
                 return;
+            if (s.mode == Mode::SkinDirectional)
+            {
+                skinnedStrip(s, triangles);
+                return;
+            }
             if (s.mode == Mode::Sprite || s.mode == Mode::Ribbon)
             {
                 (s.mode == Mode::Sprite ? sprite : ribbon)(s, triangles);
@@ -387,7 +526,7 @@ namespace tmb::native
             ++g_stats.strips;
             const uint32_t top = s.top;
             const uint32_t tag0 = s.vu.w(top, 0);
-            if (!useMaterial(s, top, triangles))
+            if (!useMaterial(s, top, s.vu.w(top, 3), triangles))
                 return;
             const uint32_t nloop = tag0 & 0x7fffu;
             const float uOffset = s.vu.f(4, 0), vOffset = s.vu.f(4, 1);
@@ -612,9 +751,9 @@ namespace tmb::native
                     else
                     {
                         const uint32_t pc = imm * 8u;
-                        if (!drawnNatively(s.code, pc))
+                        if (!decide(s.lastSetupNative, s.code, pc))
                         {
-                            if (pc != 0x0000u)
+                            if (!matches(kVertexPasses, s.code, pc))
                             {
                                 flush(s, triangles);
                                 s.mode = Mode::None; // another program, or another code image's: still on VU1
@@ -622,14 +761,22 @@ namespace tmb::native
                                 ++g_stats.skipped;
                             }
                         }
-                        else if (pc == 0x1d40u)
-                            rain(s, triangles);
-                        else if (pc == 0x0000u)
-                            vertexPass(s);
                         else
                         {
+                            // A program VU1 skips: its draws are the next group of the GS stream (the VIF1
+                            // interpreter numbers the programs it skips the same way).
                             flush(s, triangles);
-                            setup(s, pc);
+                            ps2x::native::Renderer::instance().beginGroup(++s.group);
+                            if (pc == 0x1d40u)
+                                rain(s, triangles);
+                            else if (pc == 0x0000u)
+                                vertexPass(s);
+                            else if (pc == 0x0010u)
+                                morphPass(s);
+                            else if (pc == 0x0020u || pc == 0x0030u || pc == 0x0040u)
+                                skinnedPass(s, pc == 0x0020u ? 3 : pc == 0x0030u ? 2 : 1);
+                            else
+                                setup(s, pc);
                         }
                     }
                     break;
@@ -664,6 +811,7 @@ namespace tmb::native
             ps2x::native::Screen screen;
             screen.originY = 2048.0f - 128.0f;
             screen.height = 256.0f;
+            screen.gsZScale = 16.0f; // the microprograms write Z as FTOI4 of z / w
             return screen;
         }
 
@@ -703,7 +851,12 @@ namespace tmb::native
         ps2x::native::setVif1Observer(&onVif1);
         // TMB_NATIVE_VU1=1 keeps VU1 running them too (to compare with the GS frame).
         if (const char *keep = std::getenv("TMB_NATIVE_VU1"); !(keep && *keep == '1'))
+        {
             ps2x::native::setVu1Gate(&drawnNatively);
+            // In the GS stream where VU1's output would have been (with PS2X_GS_RENDERER=native: particles, the 2D
+            // and the other GS draws sort with the 3D); with other GS renderers present() draws over the GS frame.
+            ps2x::native::Renderer::instance().setStreamDraws(true);
+        }
     }
 
     // The end of a frame's real-time processing: publish what was submitted, start the next frame.
