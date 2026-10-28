@@ -31,6 +31,20 @@ list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\\.cpp$"
 set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
 
 file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
+
+# IOP modules recompiled to native C++ by the fork's tools/iop_recomp.py (989snd, libsd; PS2X_IOP_NATIVE=1 runs them;
+# scripts/iop_recomp.sh writes them, derived from the game's IRX files like the rest of generated/): their own object
+# library, outside the unity batches (each file's names are its own), without debug info.
+file(GLOB TMB_IOP_NATIVE_SOURCES CONFIGURE_DEPENDS "${TMB_GENERATED_DIR}/iop/*.cpp")
+if(TMB_IOP_NATIVE_SOURCES)
+    add_library(tmb_iop_native OBJECT ${TMB_IOP_NATIVE_SOURCES})
+    target_link_libraries(tmb_iop_native PRIVATE ps2x::iop)
+    set_target_properties(tmb_iop_native PROPERTIES UNITY_BUILD OFF)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(tmb_iop_native PRIVATE -O2 -g0)
+    endif()
+    target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:tmb_iop_native>)
+endif()
 # The host OS layer includes <windows.h>, which clashes with raylib names: outside the unity batches and the PCH.
 set_source_files_properties("${CMAKE_SOURCE_DIR}/runtime/tmb_host.cpp" PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)

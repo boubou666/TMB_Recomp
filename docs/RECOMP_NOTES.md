@@ -917,3 +917,16 @@ under the native frame: the 2D (menus, HUD text and font drawn as GS packets), t
 - `PS2X_NATIVE_VIEW=only` hides the GS frame to look at the native one alone: menus and movies then show only while
   the native frame is empty (the GS frame comes back then); in a match, anything still on the PS2 path is missing.
 - `TMB_NATIVE_VU1=1` keeps VU1 running the native programs too (the GS frame then has everything, for comparison).
+
+### IOP modules recompiled (2026-10-28)
+989snd and libsd run as native code, recompiled by the fork's `tools/iop_recomp.py` from the images the IOP loaded
+(`PS2X_IOP_DUMP_MODULES`): 989SND 282 functions, LIBSD 54, all native (a divide-by-zero BREAK or a SYSCALL hands
+back to the interpreter at that instruction). `scripts/iop_recomp.sh` boots the game to dump them and writes
+`generated/iop/` (derived from the game's IRX files: never committed); `PS2X_IOP_NATIVE=1` runs them.
+- Match run: 49.8 fps (p10 49.5) against 49.6 (p10 48.8) interpreted, no stall or error. Sound recorded
+  (`PS2X_SPU2_WAV`) against the interpreted run: the scripted boot and menus match second by second in loudness
+  (1542 / 1543, 1124 / 1123, 2756 / 2753), the match differs with the gameplay as runs do; no clipping either way.
+- First bug found: a blocking import (WaitSema, a CD sync) must stop the native caller at its return address, not
+  let it go on as if it had returned (the bank load hung).
+- The sound is still paced by the IOP clock (the SPU2 mixes a sample per 768 IOP cycles): the native mixer on wall
+  time, under libsd, is the next step.
