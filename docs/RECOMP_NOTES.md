@@ -915,9 +915,11 @@ targets at its GS markers (`Renderer::drawGroups`), in stream order. The 3D firs
 back end marked a target holding native draws as used over all its 1024 rows, so the frame at fbp 140 covered the GS
 memory below the 224-line picture, where TMB uploads textures each frame, and every upload dropped the target with the
 3D in it (fork a4c4819: the rows its scissor reaches). US 58.9 fps mean (p10 58.5), PAL 49.4 (p10 49.3), steadier than
-with paraLLEl-GS. Open: the frame is drawn at the PS2's size (a 640 x 224 field on NTSC, doubled), so the 3D and HUD
-are softer than the native renderer's own window-resolution output was; next, presentation on the GPU and an internal
-scale in the back end.
+with paraLLEl-GS. The frame was drawn at the PS2's size (a 640 x 224 field on NTSC, doubled), the 3D and HUD softer
+than the native renderer's own window-resolution output had been: the back end now presents on the GPU (fork 4674b8b,
+the window draws its texture, no read back) and draws at an internal scale (ed20344, `PS2X_GS_SCALE`, TMB's default 2:
+1280 x 448 per field, no cost in frame rate; US 58.4 fps mean). Frame captures read the presented texture back (sc3-port's
+fix, 175ed5c).
 
 ### Native frames (2026-10-29)
 TMB's frames run on the PC clock (the fork's native mode layer 1: `FramePacer`, `EeScheduler::setNativeFrames`), no

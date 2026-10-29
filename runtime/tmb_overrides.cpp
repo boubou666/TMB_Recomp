@@ -1452,11 +1452,15 @@ namespace
 
     // With the native renderer (TMB_NATIVE=1), the GS stream (menus, HUD, 2D, movies, effects) goes to the fork's GS
     // native back end too, not to paraLLEl-GS: set before the window opens, where the runtime picks the GS renderer.
-    // PS2X_GS_RENDERER=parallel or cpu keeps that one.
+    // PS2X_GS_RENDERER=parallel or cpu keeps that one. Drawn at twice the PS2's resolution each way (PS2X_GS_SCALE,
+    // 1 is the PS2's own: the 3D and HUD of a 640 x 224 NTSC field look soft on a PC screen); no cost in frame rate.
     const bool g_nativeGsDefault = []
     {
         if (tmb::native::enabled())
+        {
             tmb::host::setEnvDefault("PS2X_GS_RENDERER", "native");
+            tmb::host::setEnvDefault("PS2X_GS_SCALE", "2");
+        }
         return true;
     }();
 
