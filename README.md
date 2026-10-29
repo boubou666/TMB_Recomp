@@ -90,7 +90,7 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 | Skinned characters, sprites, rain, fog, blending | VU1, GS | translated into the native renderer's terms (bones, fog factor, blend modes) |
 | Other VU1 programs (particles, billboards, beams) | VU1 | run on the PC by a VU1 sandbox on the adapter's copy of VU memory, their GS packets drawn natively: every VU1 draw of a match is native |
 | Textures | GS memory | decoded on the PC from the game's own uploads, palettes included |
-| Menus, 2D, movies | GS, IPU | still on the GS path (paraLLEl-GS on the GPU, or the CPU rasterizer); movies decoded with FFmpeg |
+| Menus, HUD, 2D, movies, everything else sent to the GS | GS, IPU | translated into OpenGL draws by the fork's GS native back end (no GS emulation, no paraLLEl-GS), the native 3D drawn into the same render targets in stream order; movies decoded with FFmpeg |
 
 ```
 disc files (game_us/, game/) ──► ps2_analyzer ──► recomp/tmb_scus97101.toml, tmb_sces50360.toml (+ recomp/tmb_manual.toml)
@@ -220,7 +220,7 @@ key positions):
 | `TMB_TRACE_TIMELINE=<file>` | 4 s of the match as a timeline (game events, game/vif1/gs thread CPU every 0.2 ms) for `tools/timeline.py` |
 | `PS2X_IOP_THREAD=1` | Run the IOP on its own thread (experimental, slower in TMB today) |
 | `PS2X_SHOW_FPS=0` | Hide the frame rate counter at the top right (on by default; F3 toggles it while playing) |
-| `PS2X_GS_RENDERER=cpu` | Draw with the CPU rasterizer. The default is the GPU (paraLLEl-GS, Vulkan), which falls back to the CPU when no Vulkan device is found |
+| `PS2X_GS_RENDERER=parallel` / `cpu` | The emulated GS instead of the GS native back end: paraLLEl-GS (Vulkan; the default without `TMB_NATIVE=1`) or the CPU rasterizer |
 | `TMB_TRACE_POS=<file>` | Every vehicle's position at each collision pass (`scripts/bots.sh` and `tools/falls.py` count the falls) |
 | `TMB_TRACE_BLACKBOX=<file>` | Dump the player vehicle's last 64 frames when its position goes wild |
 | `TMB_GS_SERIAL=1` | Rasterize on the GS thread alone (default: 4 rasterization workers, `PS2X_GS_RASTER_THREADS=<n>`) |

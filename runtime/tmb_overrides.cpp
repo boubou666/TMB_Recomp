@@ -1450,6 +1450,16 @@ namespace
         collisCheckHdResults__7Vehicle_0x117ad8(rdram, ctx, runtime);
     }
 
+    // With the native renderer (TMB_NATIVE=1), the GS stream (menus, HUD, 2D, movies, effects) goes to the fork's GS
+    // native back end too, not to paraLLEl-GS: set before the window opens, where the runtime picks the GS renderer.
+    // PS2X_GS_RENDERER=parallel or cpu keeps that one.
+    const bool g_nativeGsDefault = []
+    {
+        if (tmb::native::enabled())
+            tmb::host::setEnvDefault("PS2X_GS_RENDERER", "native");
+        return true;
+    }();
+
     void applyTmb(PS2Runtime &runtime)
     {
         // The frames on the PC clock (timer1HandlerNative); TMB_NATIVE_FRAMES=0 keeps them on the vblanks.

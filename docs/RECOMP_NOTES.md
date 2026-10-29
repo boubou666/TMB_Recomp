@@ -908,6 +908,17 @@ it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf40
 - PS2X_GS_RECORD never started in a match: it waits for a moment with no image transfer, and TMB uploads textures
   all the time.
 
+### GS native back end, no paraLLEl-GS (2026-10-29)
+With `TMB_NATIVE=1` the GS stream goes to the fork's GS native back end (`PS2X_GS_RENDERER=native` by default): the
+menus, HUD, fonts and movies are translated into OpenGL draws, and the adapter's 3D is drawn into the same render
+targets at its GS markers (`Renderer::drawGroups`), in stream order. The 3D first came out black with the HUD gone: the
+back end marked a target holding native draws as used over all its 1024 rows, so the frame at fbp 140 covered the GS
+memory below the 224-line picture, where TMB uploads textures each frame, and every upload dropped the target with the
+3D in it (fork a4c4819: the rows its scissor reaches). US 58.9 fps mean (p10 58.5), PAL 49.4 (p10 49.3), steadier than
+with paraLLEl-GS. Open: the frame is drawn at the PS2's size (a 640 x 224 field on NTSC, doubled), so the 3D and HUD
+are softer than the native renderer's own window-resolution output was; next, presentation on the GPU and an internal
+scale in the back end.
+
 ### Native frames (2026-10-29)
 TMB's frames run on the PC clock (the fork's native mode layer 1: `FramePacer`, `EeScheduler::setNativeFrames`), no
 longer on the emulated vblank interrupt. Every frame of the match and of the menus ends in `timer1Handler`: it adds

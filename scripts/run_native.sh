@@ -5,7 +5,7 @@
 source "$(dirname "$0")/common.sh"
 BIN="$GAME_BUILD/PS2Recomp/ps2xRuntime/ps2EntryRunner"
 [ -x "$BIN" ] || { echo "missing $BIN, run scripts/build_runtime.sh first"; exit 1; }
-export TMB_NATIVE=1 PS2X_SPU2_WALLCLOCK=1 PS2X_IOP_WALLCLOCK=1
+export TMB_NATIVE=1 PS2X_SPU2_WALLCLOCK=1 PS2X_IOP_WALLCLOCK=1 PS2X_GS_RENDERER="${PS2X_GS_RENDERER:-native}"
 if compgen -G "$GENERATED/iop/*.cpp" > /dev/null; then
     export PS2X_IOP_NATIVE=1
 else
