@@ -908,6 +908,20 @@ it kicked); `build/vu1_match.trace` (6000 match runs) all use code image 97bcf40
 - PS2X_GS_RECORD never started in a match: it waits for a moment with no image transfer, and TMB uploads textures
   all the time.
 
+### Native frames (2026-10-29)
+TMB's frames run on the PC clock (the fork's native mode layer 1: `FramePacer`, `EeScheduler::setNativeFrames`), no
+longer on the emulated vblank interrupt. Every frame of the match and of the menus ends in `timer1Handler`: it adds
+timer T0's count (576000 ticks a second) to the game's tick total, waits a vblank with `sceGsSyncV`, then adds the
+fields the frame took to the field count that `TheGame::Update` moves the cars by (the ticks rounded up to fields of
+11520 ticks, 9619 on NTSC: a 21 ms frame counted two fields). `timer1HandlerNative` replaces it: the `FramePacer`
+holds the frame to the field rate (a slower frame is shown when it ends, not at the next vblank), the EE is charged the
+real time its code did not account (T0, the vblank interrupt and the IOP follow the EE clock), the picture is latched
+(`presentGuestFrame`), and the fields come from the real time, the remainder carried to the next frame.
+`sceGsSyncV` (loading screens, dialogs, `timerWaitForMinUpdateRate`) ends a frame the same way. The movies are shown
+from the vblank handler (their loop ends no frame). `TMB_NATIVE_FRAMES=0` keeps the vblanks (and the vblank hold).
+- Check runs (TMB_NATIVE=1, paraLLEl-GS for the rest): US 58.4 fps mean, p10 57.8 (vblanks: 56.3, p10 48.8); PAL
+  49.2, p10 49.0. `TMB_TRACE_FRAMES=1` logs the fields per real second: 50.00 on PAL (the game at its own speed).
+
 ### Native path state (TMB_NATIVE=1, 2026-10-28)
 The adapter (`runtime/tmb_native.cpp`) reads every VIF1 stream the game sends (the fork's `setVif1Observer`) and
 draws natively, then tells VU1 to skip (`setVu1Gate`): the hier strips (unlit, scaled, directional, point lights),

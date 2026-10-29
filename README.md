@@ -82,6 +82,7 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 
 | Part of the game | On the PS2 | In the port |
 |---|---|---|
+| Frame timing | the vblank interrupt; the game counts the fields a frame took from a hardware timer | each frame paced on the PC's clock (the fork's `FramePacer`) and shown as soon as it ends, its fields counted from the real time it took (`TMB_NATIVE_FRAMES=0`: the vblanks) |
 | Game code (EE, MIPS R5900) | the EE CPU | 3,572 functions recompiled to C++ (`generated/`), with the ELF's own symbols |
 | Sound driver (IOP: 989SND, LIBSD) | R3000A code on the IOP | recompiled to C++ by the fork's `tools/iop_recomp.py` (`scripts/iop_recomp.sh`, `PS2X_IOP_NATIVE=1`) |
 | Sound mixing (SPU2) | the SPU2 chip, at the IOP's pace | mixed when the PC's audio device asks (`PS2X_SPU2_WALLCLOCK=1`), with the IOP on the PC's clock (`PS2X_IOP_WALLCLOCK=1`): the sound no longer slows down with the frame rate |
@@ -193,6 +194,7 @@ key positions):
 | Variable | Effect |
 |---|---|
 | `TMB_NATIVE=1` | The native renderer draws TMB's 3D from its own data (`scripts/run_native.sh` sets it) |
+| `TMB_NATIVE_FRAMES=0` | Frames on the emulated vblanks instead of the PC clock |
 | `TMB_NATIVE_SANDBOX=0` | The VU1 programs the adapter does not translate stay on VU1 and the GS (default: the VU1 sandbox runs them, drawn natively) |
 | `TMB_NATIVE_VU1=1` | VU1 runs the translated programs too (the GS frame then has everything, to compare) |
 | `TMB_NATIVE_VU1_PCS=<pc,...>` / `TMB_NATIVE_SANDBOX_PCS=<pc,...>` | Leave those setups on VU1 / run translated ones on the sandbox (to compare a program with VU1) |
@@ -204,7 +206,7 @@ key positions):
 | `PS2X_PAD_SCRIPT=t:BUTTON[/ms],…` | Scripted button presses (seconds from start), for unattended runs |
 | `PS2X_VU1_RECORD=<file>` | Record VU1 microprogram runs for `ps2_vu1_replay` / `build/game/tmb_vu1_replay` (with the compiled microcode; the default fast VU1 path differs in cycle counts only, `TMB_VU1_EXACT=1 scripts/recomp.sh` for the exact one) |
 | `PS2X_VU_AOT=0` | Interpret the VU1 microcode instead of running the compiled one |
-| `TMB_VBLANK_HOLD=<ms>` | Hold the vblank up to <ms> while a match frame finishes (default 6; 0 off); `TMB_VBLANK_HOLD_AB=1` compares on/off in one run |
+| `TMB_VBLANK_HOLD=<ms>` | With `TMB_NATIVE_FRAMES=0`: hold the vblank up to <ms> while a match frame finishes (default 6; 0 off); `TMB_VBLANK_HOLD_AB=1` compares on/off in one run |
 | `TMB_ENEMY_HEALTH_CAP=<x>` | Testing: hold the opponents' health at most x (a scripted run can win its matches) |
 | `TMB_KILL_ENEMIES=<s>` | Testing: every <s> seconds every opponent alive takes a killing hit through the game's own damage function (the kill counts; scripted story runs) |
 | `TMB_AB=<hold\|slice\|lag\|holdlimit\|fill>` | In-run A/B of an experiment, on and off every 100 vblanks, real-time fps and game speed per mode |

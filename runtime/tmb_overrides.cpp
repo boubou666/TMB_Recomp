@@ -368,6 +368,7 @@ namespace
     }
 
     constexpr uint32_t kVblankHandler = TMB_ADDR(0x001C2898u);
+    bool g_nativeFrames = false; // native frames, TMB_NATIVE_FRAMES=0 off (timer1HandlerNative)
     uint32_t g_vblankCalls = 0;
     bool g_gsLag = false;
     bool g_gsLagAb = false;
@@ -690,6 +691,9 @@ namespace
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
         updateGsLag(rdram, runtime);
         tmb::native::onVblank(); // TMB_NATIVE: publishes the menus' frames
+        // Native frames: vblanks latch no picture; a movie's pictures are shown here (its loop ends no frame).
+        if (g_nativeFrames && displaying)
+            runtime->eeScheduler().presentGuestFrame();
         if (!g_traceMovie)
             return;
         static uint32_t s_dispCalls = 0;
@@ -1023,6 +1027,103 @@ namespace
             *frameTicks = g_maxFrameTicks;
     }
 
+    // Native frames (docs/native.md, layer 1; TMB_NATIVE_FRAMES=0 off): the game's frames on the PC clock instead of the PS2's vblanks.
+    // Each frame of the match and the menus ends in timer1Handler: it adds the timer ticks of the frame (T0, 576000 a
+    // second) to the game's tick total, waits a vblank (sceGsSyncV), then adds the fields the frame took (the ticks
+    // rounded up to 1/50 s) to the game's field count, which TheGame::Update moves the cars by. The loading screens,
+    // dialogs and timerWaitForMinUpdateRate wait sceGsSyncV directly. Here both end the frame on the FramePacer
+    // instead: it holds the frame to the field rate (a longer frame is shown when it ends, not at the next vblank),
+    // the EE is charged the real time its code did not account (the timers, the vblank interrupt and the IOP follow the
+    // EE clock), and the picture is shown. The frame's fields come from the real time it took, the remainder carried
+    // to the next frame (the tick count rounds a 21 ms frame up to two fields: a game running 1.9 times too fast).
+    constexpr uint32_t kTimer1Handler = TMB_ADDR(0x001F7A98u);
+    constexpr uint32_t kSceGsSyncV = TMB_ADDR(0x00204D90u);
+    constexpr int32_t kTicsGpOffset = TMB_GP(-0x2BE0);       // the ticks before the T0 count
+    constexpr int32_t kFieldCountGpOffset = TMB_GP(-0x2BE8); // fields since the start
+    constexpr uint32_t kT0Count = 0x10000000u;
+    uint32_t g_syncVParity = 0;
+    uint64_t g_frameEndCycle = 0;
+    double g_fieldCarry = 0.0;
+
+    int32_t *gpWord(uint8_t *rdram, uint32_t gp, int32_t offset)
+    {
+        return reinterpret_cast<int32_t *>(rdram + ((gp + offset) & 0x1FFFFFFu));
+    }
+
+    // The game's fields per second (50 PAL, 60 NTSC; set by timerInit).
+    int32_t fieldRate(uint8_t *rdram, uint32_t gp)
+    {
+        const int32_t rate = *gpWord(rdram, gp, TMB_GP(-0x2BD0));
+#if defined(TMB_REGION_US)
+        return rate > 0 ? rate : 60;
+#else
+        return rate > 0 ? rate : 50;
+#endif
+    }
+
+    // Holds the frame to the field rate, charges the EE the real time it did not account, shows the picture; returns
+    // the frame's real duration.
+    double nativeFrameEnd(uint8_t *rdram, uint32_t gp, PS2Runtime *runtime)
+    {
+        FramePacer &pacer = runtime->framePacer();
+        pacer.setCap(static_cast<uint32_t>(fieldRate(rdram, gp)));
+        const double step = pacer.frameEnd();
+        EeScheduler &scheduler = runtime->eeScheduler();
+        const uint64_t real = static_cast<uint64_t>(step * static_cast<double>(EeScheduler::kEeClockHz));
+        const uint64_t accounted = scheduler.currentCycle() - g_frameEndCycle;
+        for (uint64_t debt = real > accounted ? real - accounted : 0u; debt != 0u;)
+        {
+            const uint32_t cycles = static_cast<uint32_t>(std::min<uint64_t>(debt, 1ull << 30));
+            scheduler.accountCycles(cycles);
+            debt -= cycles;
+        }
+        g_frameEndCycle = scheduler.currentCycle();
+        scheduler.presentGuestFrame();
+        return step;
+    }
+
+    void sceGsSyncVNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        nativeFrameEnd(rdram, getRegU32(ctx, 28), runtime);
+        g_syncVParity ^= 1u;
+        setReturnS32(ctx, static_cast<int32_t>(g_syncVParity));
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    void timer1HandlerNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t gp = getRegU32(ctx, 28);
+        const uint32_t parityOut = getRegU32(ctx, 4);
+        PS2Memory &memory = runtime->memory();
+        *gpWord(rdram, gp, kTicsGpOffset) += static_cast<int32_t>(memory.read32(kT0Count));
+        memory.write32(kT0Count, 0u);
+        const double step = nativeFrameEnd(rdram, gp, runtime);
+        g_syncVParity ^= 1u;
+        if (parityOut != 0u)
+            *reinterpret_cast<uint32_t *>(rdram + (parityOut & 0x1FFFFFFu)) = g_syncVParity == 0u ? 1u : 0u;
+        g_fieldCarry += step * fieldRate(rdram, gp);
+        const int32_t fields = std::clamp(static_cast<int32_t>(std::floor(g_fieldCarry)), 1, 15);
+        g_fieldCarry = std::clamp(g_fieldCarry - fields, -1.0, 1.0);
+        *gpWord(rdram, gp, kFieldCountGpOffset) += fields;
+        // TMB_TRACE_FRAMES=1: the game's fields per real second (the field rate when the game runs at its speed).
+        if (g_traceFrames)
+        {
+            static uint32_t s_frames = 0;
+            static int64_t s_fields = 0;
+            static double s_seconds = 0.0;
+            s_fields += fields;
+            s_seconds += step;
+            if (++s_frames == 1000u)
+            {
+                std::fprintf(stderr, "[tmb:native-frames] 1000 frames in %.2f s, %lld fields: %.2f fields/s (field rate %d)\n",
+                             s_seconds, static_cast<long long>(s_fields), s_fields / s_seconds, fieldRate(rdram, gp));
+                s_frames = 0, s_fields = 0, s_seconds = 0.0;
+            }
+        }
+        setReturnS32(ctx, 1);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
     // TheGame::Update moves each car by its velocity times the vblank fields since the previous frame
     // (timerGetFieldsLastFrame, copied to vehicle+0x20C8) and tests the collisions once, after the move. Built for
     // 50 fps (one field per frame, two when the PS2 is overloaded), at the two to four fields of a slow host each
@@ -1351,6 +1452,9 @@ namespace
 
     void applyTmb(PS2Runtime &runtime)
     {
+        // The frames on the PC clock (timer1HandlerNative); TMB_NATIVE_FRAMES=0 keeps them on the vblanks.
+        if (const char *frames = std::getenv("TMB_NATIVE_FRAMES"); !(frames && *frames == '0'))
+            g_nativeFrames = true;
         // Draw on the GPU (paraLLEl-GS, Vulkan): 20-23 ms per frame in the match against 24-27 with the CPU rasterizer,
         // and the four raster threads' CPU freed. PS2X_GS_RENDERER=cpu keeps the CPU rasterizer; without a Vulkan
         // device the GS falls back to it by itself.
@@ -1380,7 +1484,7 @@ namespace
             // the game at 0.99 of its speed); TMB_VBLANK_HOLD=0 turns it off.
             const char *hold = std::getenv("TMB_VBLANK_HOLD");
             const int holdMs = hold && *hold ? std::atoi(hold) : 6;
-            if (holdMs > 0)
+            if (holdMs > 0 && !g_nativeFrames)
             {
                 g_vblankHoldConfigured = g_vblankHoldNow = true;
                 runtime.eeScheduler().setVBlankHoldLimit(std::chrono::microseconds(holdMs * 1000));
@@ -1437,6 +1541,14 @@ namespace
             runtime.registerFunction(TMB_ADDR(0x00204D90u), &sceGsSyncVTimeline);
         }
         runtime.registerFunction(kSubstepReturn, &substepReturn);
+        // Native frames: the frames on the PC clock (timer1HandlerNative).
+        if (g_nativeFrames)
+        {
+            runtime.eeScheduler().setNativeFrames(true);
+            runtime.registerFunction(kTimer1Handler, &timer1HandlerNative);
+            runtime.registerFunction(kSceGsSyncV, &sceGsSyncVNative);
+            std::cout << "[tmb] native frames: paced on the PC clock at the field rate" << std::endl;
+        }
         if (const char *path = std::getenv("TMB_TRACE_BLACKBOX"); path && *path)
             g_blackboxPath = path;
         if (const char *path = std::getenv("TMB_TRACE_POS"); path && *path)
