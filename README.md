@@ -172,7 +172,8 @@ Run the game with the extracted disc folder as `cdrom0:` (that is what `scripts/
 build/game_us/PS2Recomp/ps2xRuntime/ps2EntryRunner game_us/SCUS_971.01
 ```
 
-A controller is used when one is connected; otherwise the keyboard (US key positions):
+Player 1 plays with the keyboard and the first controller, player 2 with the second controller. The default keys (US
+key positions):
 
 | PS2 button | Keyboard |
 |---|---|
@@ -184,6 +185,7 @@ A controller is used when one is connected; otherwise the keyboard (US key posit
 | Key | What it does |
 |---|---|
 | F1 | Runtime debugger |
+| F2 | Controls: rebind every PS2 button and stick direction, per player, to keys, controller buttons, sticks and triggers, mouse buttons, the wheel or mouse movement (sensitivity, invert Y, cursor capture). Saved to `input.ini` in the disc folder (`game_us/input.ini`; `PS2X_INPUT_CONFIG=<file>` for another place). |
 
 <details>
 <summary><b>Runtime and diagnostic options</b></summary>
