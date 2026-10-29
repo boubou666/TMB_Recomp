@@ -1454,12 +1454,17 @@ namespace
     // native back end too, not to paraLLEl-GS: set before the window opens, where the runtime picks the GS renderer.
     // PS2X_GS_RENDERER=parallel or cpu keeps that one. Drawn at twice the PS2's resolution each way (PS2X_GS_SCALE,
     // 1 is the PS2's own: the 3D and HUD of a 640 x 224 NTSC field look soft on a PC screen); no cost in frame rate.
+    // The rest of the native port too: the IOP modules recompiled by scripts/iop_recomp.sh run as native code (the
+    // others interpreted), the SPU2 mixed and the IOP run on the PC's clock. Each can be set to 0.
     const bool g_nativeGsDefault = []
     {
         if (tmb::native::enabled())
         {
             tmb::host::setEnvDefault("PS2X_GS_RENDERER", "native");
             tmb::host::setEnvDefault("PS2X_GS_SCALE", "2");
+            tmb::host::setEnvDefault("PS2X_IOP_NATIVE", "1");
+            tmb::host::setEnvDefault("PS2X_SPU2_WALLCLOCK", "1");
+            tmb::host::setEnvDefault("PS2X_IOP_WALLCLOCK", "1");
         }
         return true;
     }();

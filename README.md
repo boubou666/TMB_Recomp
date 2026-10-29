@@ -63,7 +63,7 @@ path (`scripts/run_native.sh`, at twice the PS2's resolution) a match runs at 58
 | Full speed (60 fps USA, 50 fps Europe): native renderer, VU1 microcode as native code | ✅ |
 | Frames paced on the PC's clock, not on the PS2's vblanks | ✅ |
 | Sound and music (989SND, movie audio) | ✅ |
-| Sound driver (989SND, LIBSD) recompiled, mixed on the PC's clock (not tied to the frame rate) | ✅ |
+| Every IOP module recompiled (sound driver, pad, memory card...), sound mixed on the PC's clock (not tied to the frame rate) | ✅ |
 | Every VU1 draw native (translated programs plus the VU1 sandbox) | ✅ |
 | No GS emulation: menus, HUD, 2D and movies translated into OpenGL draws (the fork's GS native back end, no paraLLEl-GS) | ✅ |
 | Multi-player split screen (two controllers; `PS2X_PAD2_SCRIPT` for a scripted player 2) | ✅ |
@@ -90,7 +90,7 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 |---|---|---|
 | Frame timing | the vblank interrupt; the game counts the fields a frame took from a hardware timer | each frame paced on the PC's clock (the fork's `FramePacer`) and shown as soon as it ends, its fields counted from the real time it took (`TMB_NATIVE_FRAMES=0`: the vblanks) |
 | Game code (EE, MIPS R5900) | the EE CPU | 3,572 functions recompiled to C++ (`generated/`), with the ELF's own symbols |
-| Sound driver (IOP: 989SND, LIBSD) | R3000A code on the IOP | recompiled to C++ by the fork's `tools/iop_recomp.py` (`scripts/iop_recomp.sh`, `PS2X_IOP_NATIVE=1`) |
+| IOP modules (989SND, LIBSD, PADMAN, SIO2MAN, MTAPMAN, MCMAN, MCSERV, USBD, LGDEV) | R3000A code on the IOP | all recompiled to C++ by the fork's `tools/iop_recomp.py` (`scripts/iop_recomp.sh`); none left interpreted |
 | Sound mixing (SPU2) | the SPU2 chip, at the IOP's pace | mixed when the PC's audio device asks (`PS2X_SPU2_WALLCLOCK=1`), with the IOP on the PC's clock (`PS2X_IOP_WALLCLOCK=1`): the sound no longer slows down with the frame rate |
 | 3D (hier renderer: terrain, buildings, cars, characters) | VU1 microprograms, then the GS | read from the game's own data as it is sent (meshes, matrices, lights, materials) and drawn by the native renderer (`runtime/tmb_native.cpp`, `TMB_NATIVE=1`); VU1 does not run them |
 | Skinned characters, sprites, rain, fog, blending | VU1, GS | translated into the native renderer's terms (bones, fog factor, blend modes) |
@@ -149,7 +149,7 @@ scripts/extract_iso.sh "/path/to/Twisted Metal - Black (USA).iso"      # disc fi
 scripts/build_tools.sh                                                  # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
 scripts/recomp.sh                                                       # ELF + recomp/tmb_scus97101.toml -> generated_us/ (VU1 microcode -> generated_us/vu1/)
 scripts/build_runtime.sh                                                # runtime + generated code -> build/game_us
-scripts/iop_recomp.sh                                                   # optional: boots once to recompile the sound driver -> generated_us/iop/, then rebuild
+scripts/iop_recomp.sh                                                   # optional: boots once to recompile the IOP modules -> generated_us/iop/, then rebuild
 scripts/run_native.sh                                                   # the native port (native renderer, recompiled sound driver, sound on the PC clock)
 scripts/run.sh                                                          # the PS2 path only (VU1 and GS simulated), for comparison
 scripts/pgo.sh                                                          # optional, experimental: profile-guided rebuild (~200 s of scripted play)
@@ -204,7 +204,7 @@ key positions):
 
 | Variable | Effect |
 |---|---|
-| `TMB_NATIVE=1` | The native renderer draws TMB's 3D from its own data (`scripts/run_native.sh` sets it) |
+| `TMB_NATIVE=1` | The native port: the native renderer, the GS native back end at 2x, the recompiled IOP modules, the SPU2 and IOP on the PC's clock (`scripts/run_native.sh` sets it; each part has its own switch below) |
 | `TMB_NATIVE_FRAMES=0` | Frames on the emulated vblanks instead of the PC clock |
 | `PS2X_GS_SCALE=<n>` | With `TMB_NATIVE=1`: the internal resolution, n times the PS2's each way (1 to 4, default 2) |
 | `PS2X_WINDOW_SIZE=<w>x<h>` | The window's size when it opens |
