@@ -1450,6 +1450,72 @@ namespace
         collisCheckHdResults__7Vehicle_0x117ad8(rdram, ctx, runtime);
     }
 
+    // TMB_FX_TEST=<seconds>: an effects test bench. In a match, every <seconds> one of the game's 87 particle effect
+    // types is created (particleCreateFx, the call its weapons and props make) at the player's car, always in view
+    // whatever the camera does, each logged with its time ([tmb:fx]); captured with PS2X_CAPTURE_WINDOW_DIR on the PS2
+    // path (TMB_NATIVE=0) and on the native one, the same effects come at about the same moments, to compare. The call
+    // is made at particleMove's entry (once a frame, the game's own place for particles) and returns to kFxTestReturn
+    // (padding before a function, never executed), which then runs particleMove as it was called.
+    constexpr uint32_t kParticleMove = TMB_ADDR(0x001E6368u);
+    constexpr uint32_t kParticleCreateFx = TMB_ADDR(0x001E7820u);
+    constexpr uint32_t kFxTestReturn = TMB_ADDR(0x00100264u);
+    constexpr uint32_t kVehiclePosition = 0x260u; // as TMB_TRACE_POS reads it
+    constexpr int kFxTypes = 87;                  // particleInit's table: 0x57 entries
+    const auto g_processStart = std::chrono::steady_clock::now();
+
+    struct FxTest
+    {
+        double period = 0.0, next = 0.0;
+        int type = 0;
+        uint32_t ra = 0, sp = 0;
+    } g_fxTest;
+
+    double processSeconds()
+    {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_processStart).count();
+    }
+
+    void particleMoveFxTest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        FxTest &t = g_fxTest;
+        const double now = processSeconds();
+        if (t.next == 0.0)
+            t.next = now + 5.0; // the match's first seconds without
+        if (now < t.next || t.type >= kFxTypes)
+        {
+            particleMove__Fv_0x1e6368(rdram, ctx, runtime);
+            return;
+        }
+        t.next = now + t.period;
+        const int type = t.type++;
+        float target[4];
+        std::memcpy(target, rdram + kPlayerVehicle + kVehiclePosition, sizeof(target));
+        target[3] = 1.0f;
+        t.ra = getRegU32(ctx, 31);
+        t.sp = getRegU32(ctx, 29);
+        const uint32_t sp = (t.sp - 0x40u) & ~0xFu; // the vector above the callee's frame
+        std::memcpy(rdram + ((sp + 0x10u) & 0x1FFFFFFu), target, sizeof(target));
+        SET_GPR_U32(ctx, 29, sp);
+        SET_GPR_U32(ctx, 4, sp + 0x10u);
+        SET_GPR_U32(ctx, 5, static_cast<uint32_t>(type));
+        SET_GPR_U32(ctx, 6, 0u); // no orientation
+        ctx->f[12] = 1.0f;       // scale
+        ctx->f[13] = 0.0f;
+        SET_GPR_U32(ctx, 31, kFxTestReturn);
+        std::fprintf(stderr, "[tmb:fx] t=%.2f type %d at %.1f %.1f %.1f\n", now, type, target[0], target[1], target[2]);
+        ctx->pc = kParticleCreateFx;
+        particleCreateFx__FP8_fvectorifPA3_ff_0x1e7820(rdram, ctx, runtime);
+    }
+
+    void fxTestReturn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        std::fprintf(stderr, "[tmb:fx]   -> fx %d\n", static_cast<int32_t>(getRegU32(ctx, 2)));
+        SET_GPR_U32(ctx, 29, g_fxTest.sp);
+        SET_GPR_U32(ctx, 31, g_fxTest.ra);
+        ctx->pc = kParticleMove;
+        particleMove__Fv_0x1e6368(rdram, ctx, runtime);
+    }
+
     // With the native renderer (TMB_NATIVE=1), the GS stream (menus, HUD, 2D, movies, effects) goes to the fork's GS
     // native back end too, not to paraLLEl-GS: set before the window opens, where the runtime picks the GS renderer.
     // PS2X_GS_RENDERER=parallel or cpu keeps that one. Drawn at twice the PS2's resolution each way (PS2X_GS_SCALE,
@@ -1560,6 +1626,12 @@ namespace
             runtime.registerFunction(TMB_ADDR(0x00204D90u), &sceGsSyncVTimeline);
         }
         runtime.registerFunction(kSubstepReturn, &substepReturn);
+        if (const char *fx = std::getenv("TMB_FX_TEST"); fx && *fx)
+        {
+            g_fxTest.period = std::max(0.5, std::atof(fx));
+            runtime.registerFunction(kParticleMove, &particleMoveFxTest);
+            runtime.registerFunction(kFxTestReturn, &fxTestReturn);
+        }
         // Native frames: the frames on the PC clock (timer1HandlerNative).
         if (g_nativeFrames)
         {

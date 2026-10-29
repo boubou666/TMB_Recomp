@@ -21,6 +21,7 @@
 #include "tmb_region.h" // TMB_REGION_US / TMB_REGION_PAL
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -148,6 +149,30 @@ namespace tmb::native
         // TMB_NATIVE_SANDBOX=0: the programs the adapter does not translate stay on VU1 (drawn by the GS, under the
         // native frame with renderers that keep GS memory themselves); by default the adapter's own VU1 runs them and
         // they are drawn natively too (ps2x::native::Vu1Sandbox).
+        // TMB_NATIVE_SANDBOX_AB=<seconds>: the sandbox on and off every <seconds> of play, switched at a frame's end and
+        // logged ([tmb:native] sandbox on/off at t=...): the same scenes with the effects from the sandbox and from VU1
+        // and the GS, to compare in one run.
+        bool g_sandboxPhase = true;
+
+        void updateSandboxAb()
+        {
+            static const double s_period = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_SANDBOX_AB");
+                return value && *value ? std::atof(value) : 0.0;
+            }();
+            if (s_period <= 0.0)
+                return;
+            static const auto s_start = std::chrono::steady_clock::now();
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+            const bool on = static_cast<long long>(t / s_period) % 2 == 0;
+            if (on != g_sandboxPhase)
+            {
+                g_sandboxPhase = on;
+                std::fprintf(stderr, "[tmb:native] sandbox %s at t=%.2f\n", on ? "on" : "off", t);
+            }
+        }
+
         bool sandboxed()
         {
             static const bool s_on = []
@@ -975,7 +1000,7 @@ namespace tmb::native
                         }();
                         if (!matches(kVertexPasses, s.code, pc))
                             s.setupOnVu1 = std::find(s_onVu1.begin(), s_onVu1.end(), pc) != s_onVu1.end();
-                        const bool sandbox = !native && s.sandbox && inMatch() && !s.setupOnVu1;
+                        const bool sandbox = !native && s.sandbox && g_sandboxPhase && inMatch() && !s.setupOnVu1;
                         noteDecision(pc, native || sandbox);
                         if (!native)
                         {
@@ -1078,7 +1103,7 @@ namespace tmb::native
                     const size_t size = static_cast<size_t>(imm ? imm : 65536u) * 4u;
                     const size_t have = std::min(size, count - i);
                     readDirect(s, words + i, have / 4u);
-                    const bool native = s.sandbox && inMatch() && have == size && drawsOnly(words + i, have / 4u);
+                    const bool native = s.sandbox && g_sandboxPhase && inMatch() && have == size && drawsOnly(words + i, have / 4u);
                     // TMB_NATIVE_LOG_DIRECT=1: the A+D addresses of some DIRECT packets in a match.
                     static const bool s_logDirect = std::getenv("TMB_NATIVE_LOG_DIRECT") != nullptr;
                     static uint32_t s_directLogged = 0;
@@ -1127,7 +1152,10 @@ namespace tmb::native
             screen.originY = 2048.0f - 128.0f;
             screen.height = 256.0f;
 #endif
-            screen.gsZScale = 16.0f; // the microprograms write Z as FTOI4 of z / w
+            // The microprograms write Z as FTOI4 of z / w, but into XYZF2 (the strips, the sprites: they carry fog),
+            // whose 24-bit Z is that word over 16: GS Z is z / w itself. With 16, the adapter's scenery sat 16 times
+            // nearer than the effects VU1 and the sandbox draw over it, and hid most of them.
+            screen.gsZScale = 1.0f;
             return screen;
         }
 
@@ -1283,6 +1311,7 @@ namespace tmb::native
         if (!enabled())
             return;
         g_vblanksSinceFrameEnd = 0;
+        updateSandboxAb();
         publish();
     }
 
