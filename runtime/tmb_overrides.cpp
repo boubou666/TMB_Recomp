@@ -1574,6 +1574,9 @@ namespace
             tmb::host::setEnvDefault("PS2X_SPU2_WALLCLOCK", "1");
             tmb::host::setEnvDefault("PS2X_IOP_WALLCLOCK", "1");
         }
+        // The runtime's debugger window starts hidden (F1 shows it, PS2X_DEBUG_UI=1 starts with it): here, before the
+        // window opens, where the debug panel reads it (applyTmb comes later, with the ELF).
+        tmb::host::setEnvDefault("PS2X_DEBUG_UI", "0");
         return true;
     }();
 
@@ -1589,8 +1592,6 @@ namespace
             std::cout << "[tmb] GS on the GPU (PS2X_GS_RENDERER=cpu for the CPU rasterizer)" << std::endl;
         // The game's frame rate at the top right while the speed work goes on (F3 hides it, PS2X_SHOW_FPS=0 is off).
         tmb::host::setEnvDefault("PS2X_SHOW_FPS", "1");
-        // The runtime's debugger window starts hidden (F1 shows it, PS2X_DEBUG_UI=1 starts with it).
-        tmb::host::setEnvDefault("PS2X_DEBUG_UI", "0");
         // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {
