@@ -188,6 +188,22 @@ namespace tmb::native
         uint32_t g_vblanksSinceFrameEnd = 0;
         bool inMatch() { return g_vblanksSinceFrameEnd < 3u; }
 
+        // The menus' VU1 programs on the sandbox too (TMB_NATIVE_MENUS=0: left to VU1 and the GS). Their frames end at
+        // sceGsSyncV (onMenuFrameEnd, with native frames), and their draws go to the GS front end with their packets'
+        // register writes (GifToNative::setGsWrites): the menus set their own screen, textures and targets, which the
+        // GS then has as it would.
+        uint32_t g_vblanksSinceMenuFrame = 3u;
+        uint32_t g_menuFrames = 0, g_menuPrograms = 0; // logged every 500 menu frames
+        bool menusNative()
+        {
+            static const bool s_on = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_MENUS");
+                return !(value && *value == '0');
+            }();
+            return s_on && !inMatch() && g_vblanksSinceMenuFrame < 3u;
+        }
+
         // What the adapter decided for each MSCAL as it read the stream (at the transfer's start, on the EE thread),
         // for the VU1 gate when VIF1 gets to it: the two agree program for program (the GS stream's groups count
         // the skipped ones on both sides), whatever changed in between (a match starting, a menu).
@@ -510,8 +526,8 @@ namespace tmb::native
             const auto it = s_seen.find(key);
             if (it != s_seen.end() && it->second == value)
                 return;
-            static uint32_t s_lines = 0;
-            if (++s_lines > 400u)
+            static std::unordered_map<char, uint32_t> s_lines; // 400 per source
+            if (++s_lines[where[0]] > 400u)
                 return;
             s_seen[key] = value;
             std::fprintf(stderr, "[tmb:native] %s A+D %#x = %#llx\n", where, address, static_cast<unsigned long long>(value));
@@ -1000,7 +1016,8 @@ namespace tmb::native
                         }();
                         if (!matches(kVertexPasses, s.code, pc))
                             s.setupOnVu1 = std::find(s_onVu1.begin(), s_onVu1.end(), pc) != s_onVu1.end();
-                        const bool sandbox = !native && s.sandbox && g_sandboxPhase && inMatch() && !s.setupOnVu1;
+                        const bool menus = menusNative();
+                        const bool sandbox = !native && s.sandbox && g_sandboxPhase && (inMatch() || menus) && !s.setupOnVu1;
                         noteDecision(pc, native || sandbox);
                         if (!native)
                         {
@@ -1015,6 +1032,14 @@ namespace tmb::native
                                 if (!matches(kVertexPasses, s.code, pc))
                                     s.sandboxSetup = pc;
                                 s.sandbox->gif().setSource((s.sandboxSetup << 16) | pc); // its setup and itself
+                                // TMB_NATIVE_GSWRITES=1: in a match too (the GS's scissor, textures and blending).
+                                static const bool s_gsWrites = []
+                                {
+                                    const char *value = std::getenv("TMB_NATIVE_GSWRITES");
+                                    return value && *value == '1';
+                                }();
+                                s.sandbox->gif().setGsWrites(menus || s_gsWrites);
+                                g_menuPrograms += menus ? 1u : 0u;
                                 s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
                                                 s.top, s.itops);
                             }
@@ -1319,7 +1344,24 @@ namespace tmb::native
     // is published empty (so the last match frame does not stay over them) once three vblanks went by without one.
     void onVblank()
     {
-        if (enabled() && ++g_vblanksSinceFrameEnd >= 3u)
+        if (!enabled())
+            return;
+        ++g_vblanksSinceMenuFrame;
+        if (++g_vblanksSinceFrameEnd >= 3u && g_vblanksSinceMenuFrame >= 3u)
             publish();
+    }
+
+    // A native frame end (timer 1 or sceGsSyncV) outside a match: the end of a menu frame; publishes what the sandbox drew of it.
+    void onMenuFrameEnd()
+    {
+        if (!enabled() || inMatch())
+            return;
+        g_vblanksSinceMenuFrame = 0;
+        if (++g_menuFrames % 500u == 0u)
+        {
+            std::fprintf(stderr, "[tmb:native] menus: 500 frames, %u programs on the sandbox\n", g_menuPrograms);
+            g_menuPrograms = 0;
+        }
+        publish();
     }
 }

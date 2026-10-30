@@ -49,6 +49,7 @@ namespace tmb::native
     void install();
     void onFrameEnd();
     void onVblank();
+    void onMenuFrameEnd();
     void patchFlareDepth(uint8_t *rdram, uint32_t image, uint32_t dest);
     bool enabled();
 }
@@ -1008,7 +1009,8 @@ namespace
             static uint64_t s_lastTick = 0;
             const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
             const bool slow = tick - s_lastTick >= 2u;
-            ps2x::profiling::setSampleGate(s_lastTick != 0 && slow != s_fastFrames);
+            if (!std::getenv("TMB_PROFILE_HITCH"))
+                ps2x::profiling::setSampleGate(s_lastTick != 0 && slow != s_fastFrames);
             if (s_lastTick != 0)
             {
                 noteLagAbFrame(runtime, tick - s_lastTick);
@@ -1061,13 +1063,56 @@ namespace
 #endif
     }
 
+    // TMB_PROFILE_HITCH=<ms> (with PS2X_PROFILE and PS2X_PROFILE_GATED=1): the profiler samples only while the frame
+    // under way has lasted longer than that, from a watcher thread: what the game does during its freezes, which a
+    // gate decided at frame ends (one frame late) misses.
+    std::atomic<double> g_lastFrameEndSeconds{0.0};
+    const auto g_hitchClockStart = std::chrono::steady_clock::now();
+
+    double hitchClock() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_hitchClockStart).count(); }
+
+    void startHitchProfiler()
+    {
+        const char *value = std::getenv("TMB_PROFILE_HITCH");
+        const double threshold = value && *value ? std::atof(value) / 1000.0 : 0.0;
+        if (threshold <= 0.0)
+            return;
+        std::thread([threshold]
+                    {
+                        for (;;)
+                        {
+                            const double last = g_lastFrameEndSeconds.load(std::memory_order_relaxed);
+                            ps2x::profiling::setSampleGate(last > 0.0 && hitchClock() - last > threshold);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        }
+                    })
+            .detach();
+    }
+
     // Holds the frame to the field rate, charges the EE the real time it did not account, shows the picture; returns
     // the frame's real duration.
     double nativeFrameEnd(uint8_t *rdram, uint32_t gp, PS2Runtime *runtime)
     {
         FramePacer &pacer = runtime->framePacer();
         pacer.setCap(static_cast<uint32_t>(fieldRate(rdram, gp)));
+        tmb::native::onMenuFrameEnd(); // TMB_NATIVE: publishes a menu frame's native draws (not in a match)
         const double step = pacer.frameEnd();
+        g_lastFrameEndSeconds.store(hitchClock(), std::memory_order_relaxed);
+        // TMB_TRACE_HITCH=<ms>: each game frame longer than that (from one frame end to the next), with when it ended.
+        static const double s_hitchSeconds = []
+        {
+            const char *value = std::getenv("TMB_TRACE_HITCH");
+            return value && *value ? std::atof(value) / 1000.0 : 0.0;
+        }();
+        if (s_hitchSeconds > 0.0)
+        {
+            static double s_last = -1.0;
+            static const auto s_start = std::chrono::steady_clock::now();
+            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+            if (s_last >= 0.0 && now - s_last > s_hitchSeconds)
+                std::fprintf(stderr, "[tmb:hitch] game frame %.0f ms, until t=%.2f\n", (now - s_last) * 1000.0, now);
+            s_last = now;
+        }
         EeScheduler &scheduler = runtime->eeScheduler();
         const uint64_t real = static_cast<uint64_t>(step * static_cast<double>(EeScheduler::kEeClockHz));
         const uint64_t accounted = scheduler.currentCycle() - g_frameEndCycle;
@@ -1638,6 +1683,7 @@ namespace
             runtime.eeScheduler().setNativeFrames(true);
             runtime.registerFunction(kTimer1Handler, &timer1HandlerNative);
             runtime.registerFunction(kSceGsSyncV, &sceGsSyncVNative);
+            startHitchProfiler();
             std::cout << "[tmb] native frames: paced on the PC clock at the field rate" << std::endl;
         }
         if (const char *path = std::getenv("TMB_TRACE_BLACKBOX"); path && *path)
