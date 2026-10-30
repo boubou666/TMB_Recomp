@@ -52,6 +52,7 @@ namespace tmb::native
             Point,
             Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
             Rain,   // the effects image's rain lines (0x1d40)
+            Ribbon, // beams and trails (0x3270): two screen-space vertices per point, a triangle strip
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
             Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
         };
@@ -65,6 +66,7 @@ namespace tmb::native
             case 0x0ce8: return Mode::Directional;
             case 0x1700: return Mode::Point;
             case 0x3000: return Mode::Sprite;
+            case 0x3270: return Mode::Ribbon;
             case 0x0050:
             case 0x0070: return Mode::SkinDirectional;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
@@ -84,7 +86,7 @@ namespace tmb::native
         };
         constexpr Program kSetups[] = {{0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u}, {0x0d08u, 0x420f01dfu},
                                        {0x1700u, 0x420f00a0u}, {0x0050u, 0x420f0376u}, {0x0070u, 0x420f0372u},
-                                       {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}};
+                                       {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}, {0x3270u, 0x420f0532u}};
         constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
                                              {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
@@ -770,10 +772,98 @@ namespace tmb::native
             }
         }
 
+        // A beam or trail (0x3270, its MSCNTs from 0x3290): N points from TOP (N in the tag at TOP, the header in its
+        // w). Point k is projected through the object's matrix (screen = M p, q = 1 / w) and widened on screen to two
+        // vertices, x + r and x - r with r = 608 p.w q, x and y held to 0..4095; their texture coordinates (4.12, plus
+        // VU 4.xy, over Q) and colours (times VU 5, plus VU 20, at most 255) come in pairs from TOP. Fog as the strips
+        // (VU 4.w + VU 21.x + VU 21.w q, 0 to VU 21.y). Both vertices of a point take ADC (no triangle) when the point
+        // is outside the clip volume (VU 13-16 x VU 0-3, the setup's last vf13-16, on p with y - 2: CLIP) or every other point (the count left,
+        // N - 1 - k, odd): the strip is drawn as separate segments. The loop is software-pipelined: the reads below
+        // follow it (point k + 1 read while k is written, 3 or 6 quadwords on by the parity).
+        void ribbon(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            if (!useMaterial(s, top, vu.w(top, 3), triangles))
+                return;
+            const uint32_t count = vu.w(top, 0) & 0x7fffu;
+            float clip[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    clip[j * 4 + k] = vu.f(13, k) * vu.f(j, 0) + vu.f(14, k) * vu.f(j, 1) + vu.f(15, k) * vu.f(j, 2) + vu.f(16, k) * vu.f(j, 3);
+            const auto colourAt = [&](uint32_t qw)
+            {
+                float c[4];
+                for (int k = 0; k < 4; ++k)
+                    c[k] = std::min(static_cast<float>(static_cast<int32_t>(vu.w(qw, k))) * vu.f(5, k) + vu.f(20, k), 255.0f);
+                return clampByte(c[0]) | (clampByte(c[1]) << 8) | (clampByte(c[2]) << 16) | (clampByte(c[3]) << 24);
+            };
+            const auto uvAt = [&](uint32_t qw, ps2x::native::Vertex &out)
+            {
+                const float q = static_cast<float>(static_cast<int32_t>(vu.w(qw, 2))) / 4096.0f;
+                const float sOff = static_cast<float>(static_cast<int32_t>(vu.w(qw, 0))) / 4096.0f + vu.f(4, 0);
+                const float tOff = static_cast<float>(static_cast<int32_t>(vu.w(qw, 1))) / 4096.0f + vu.f(4, 1);
+                out.u = q != 0.0f ? sOff / q : sOff;
+                out.v = q != 0.0f ? tOff / q : tOff;
+            };
+            std::vector<ps2x::native::Vertex> strip;
+            std::vector<bool> adc;
+            strip.reserve(count * 2u);
+            adc.reserve(count * 2u);
+            uint32_t position = top + 1u, next = top + 4u;
+            for (uint32_t k = 0; k < count; ++k)
+            {
+                const uint32_t parity = (count - 1u - k) & 1u;
+                const float p[4] = {vu.f(position, 0), vu.f(position, 1), vu.f(position, 2), vu.f(position, 3)};
+                position = next;
+                next += parity ? 3u : 6u;
+                float c[4], cc[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    c[i] = s.matrix[i] * p[0] + s.matrix[4 + i] * p[1] + s.matrix[8 + i] * p[2] + s.matrix[12 + i];
+                    cc[i] = clip[i] * p[0] + clip[4 + i] * (p[1] - 2.0f) + clip[8 + i] * p[2] + clip[12 + i];
+                }
+                const float q = 1.0f / c[3];
+                const float aw = std::fabs(cc[3]);
+                const bool clipped = std::fabs(cc[0]) > aw || std::fabs(cc[1]) > aw || std::fabs(cc[2]) > aw;
+                const float x = c[0] * q, y = std::min(std::max(c[1] * q, 0.0f), 4095.0f), z = c[2] * q * vu.f(4, 2);
+                const float r = p[3] * q * 608.0f;
+                const float fog = std::min(std::max(vu.f(4, 3) + vu.f(21, 0) + vu.f(21, 3) * q, 0.0f), vu.f(21, 1)) / 255.0f;
+                ps2x::native::Vertex a, b;
+                a.x = std::min(std::max(x + r, 0.0f), 4095.0f);
+                b.x = std::min(std::max(x - r, 0.0f), 4095.0f);
+                a.y = b.y = y;
+                a.z = b.z = z;
+                a.fog = b.fog = fog;
+                uvAt(top + 3u + 6u * k, a);
+                uvAt(top + 6u + 6u * k, b);
+                a.rgba = colourAt(k == 0u ? top + 2u : top + 6u * k - 1u);
+                b.rgba = colourAt(top + 6u * k + (k == 0u ? 5u : 2u));
+                strip.push_back(a);
+                strip.push_back(b);
+                adc.push_back(clipped || parity != 0u);
+                adc.push_back(clipped || parity != 0u);
+            }
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                if (adc[i])
+                    continue;
+                triangles.push_back(strip[i - 2]);
+                triangles.push_back(strip[i - 1]);
+                triangles.push_back(strip[i]);
+            }
+        }
+
         void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             if (s.mode == Mode::None)
                 return;
+            if (s.mode == Mode::Ribbon)
+            {
+                ribbon(s, triangles);
+                return;
+            }
             if (s.mode == Mode::SkinDirectional)
             {
                 skinnedStrip(s, triangles);
@@ -885,7 +975,7 @@ namespace tmb::native
                 material.gsWrites = std::move(writes);
             }
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain ? kScreenSpace : s.matrix, triangles.data(),
+            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon ? kScreenSpace : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
             triangles.clear();
         }
@@ -1084,7 +1174,7 @@ namespace tmb::native
             const std::vector<ps2x::native::Vertex> &vu = s.checkVertices;
             const auto screenOf = [&](const ps2x::native::Vertex &v, float out[3])
             {
-                if (s.mode == Mode::Sprite || s.mode == Mode::Rain)
+                if (s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon)
                 {
                     out[0] = v.x, out[1] = v.y, out[2] = v.z;
                     return;
