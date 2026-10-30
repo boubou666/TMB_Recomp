@@ -48,7 +48,6 @@ namespace tmb::native
 {
     void install();
     void onFrameEnd();
-    void onVblank();
     void onMenuFrameEnd();
     void patchFlareDepth(uint8_t *rdram, uint32_t image, uint32_t dest);
     bool enabled();
@@ -691,10 +690,8 @@ namespace
         timelineEvent('B');
         vblankHandler__Fi_0x1c2898(rdram, ctx, runtime);
         updateGsLag(rdram, runtime);
-        tmb::native::onVblank(); // TMB_NATIVE: publishes the menus' frames
-        // Native frames: vblanks latch no picture; a movie's pictures are shown here (its loop ends no frame).
-        if (g_nativeFrames && displaying)
-            runtime->eeScheduler().presentGuestFrame();
+        // Native frames: vblanks latch no picture. A movie's or a load's screen (they end no frame) is shown by the
+        // host on its own clock (PS2X_NATIVE_IDLE_PRESENT_MS), not here.
         if (!g_traceMovie)
             return;
         static uint32_t s_dispCalls = 0;
@@ -1592,6 +1589,8 @@ namespace
             std::cout << "[tmb] GS on the GPU (PS2X_GS_RENDERER=cpu for the CPU rasterizer)" << std::endl;
         // The game's frame rate at the top right while the speed work goes on (F3 hides it, PS2X_SHOW_FPS=0 is off).
         tmb::host::setEnvDefault("PS2X_SHOW_FPS", "1");
+        // The runtime's debugger window starts hidden (F1 shows it, PS2X_DEBUG_UI=1 starts with it).
+        tmb::host::setEnvDefault("PS2X_DEBUG_UI", "0");
         // Rasterize on 4 worker threads (TMB_GS_SERIAL=1 keeps the GS thread alone).
         if (const char *serial = std::getenv("TMB_GS_SERIAL"); !(serial && *serial == '1'))
         {

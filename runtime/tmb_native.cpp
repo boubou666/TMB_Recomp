@@ -99,6 +99,11 @@ namespace tmb::native
 
         // The same decision on the VIF1 thread (the gate) and in the adapter (the stream), each with its own state,
         // over the same MSCALs in the same order.
+        // TMB_NATIVE_TRANSLATE_AB=<seconds>: the programs TMB translates alternate between the translation and the
+        // sandbox (VU1's own arithmetic) every <seconds>, switched at a frame's end and logged: the same scenes drawn
+        // both ways in one run, to find where the translation differs.
+        bool g_translatePhase = true;
+
         bool decide(bool &lastSetupNative, const uint8_t *vu1Code, uint32_t startPc)
         {
             // TMB_NATIVE_HIDE=<pc>[,<pc>...] (hex): VU1 skips those programs and nothing draws them (to see what they are).
@@ -134,6 +139,11 @@ namespace tmb::native
                     }
                 return pcs;
             }();
+            if (!g_translatePhase)
+            {
+                lastSetupNative = false;
+                return false;
+            }
             for (uint32_t pc : s_sandboxed)
                 if (pc == startPc)
                 {
@@ -173,6 +183,25 @@ namespace tmb::native
             }
         }
 
+        void updateTranslateAb()
+        {
+            static const double s_period = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_TRANSLATE_AB");
+                return value && *value ? std::atof(value) : 0.0;
+            }();
+            if (s_period <= 0.0)
+                return;
+            static const auto s_start = std::chrono::steady_clock::now();
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+            const bool on = static_cast<long long>(t / s_period) % 2 == 0;
+            if (on != g_translatePhase)
+            {
+                g_translatePhase = on;
+                std::fprintf(stderr, "[tmb:native] translation %s at t=%.2f\n", on ? "on" : "off (sandbox)", t);
+            }
+        }
+
         bool sandboxed()
         {
             static const bool s_on = []
@@ -183,16 +212,20 @@ namespace tmb::native
             return s_on;
         }
 
-        // vblanks since the last end of a match frame: the menus (the shell overlay's loop) have none, and draw with
-        // their own screen setup; the native path is for matches, the menus stay on VU1 and the GS.
-        uint32_t g_vblanksSinceFrameEnd = 0;
-        bool inMatch() { return g_vblanksSinceFrameEnd < 3u; }
+        // A match is under way while its frames end (the end of real-time processing, onFrameEnd) less than 100 ms
+        // apart on the host's clock; the menus (the shell overlay's loop) end none.
+        double hostSeconds()
+        {
+            static const auto s_start = std::chrono::steady_clock::now();
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+        }
+        double g_lastMatchFrame = -1.0, g_lastMenuFrame = -1.0;
+        bool inMatch() { return g_lastMatchFrame >= 0.0 && hostSeconds() - g_lastMatchFrame < 0.1; }
 
         // The menus' VU1 programs on the sandbox too (TMB_NATIVE_MENUS=0: left to VU1 and the GS). Their frames end at
         // sceGsSyncV (onMenuFrameEnd, with native frames), and their draws go to the GS front end with their packets'
         // register writes (GifToNative::setGsWrites): the menus set their own screen, textures and targets, which the
         // GS then has as it would.
-        uint32_t g_vblanksSinceMenuFrame = 3u;
         uint32_t g_menuFrames = 0, g_menuPrograms = 0; // logged every 500 menu frames
         bool menusNative()
         {
@@ -201,7 +234,7 @@ namespace tmb::native
                 const char *value = std::getenv("TMB_NATIVE_MENUS");
                 return !(value && *value == '0');
             }();
-            return s_on && !inMatch() && g_vblanksSinceMenuFrame < 3u;
+            return s_on && !inMatch() && g_lastMenuFrame >= 0.0 && hostSeconds() - g_lastMenuFrame < 0.1;
         }
 
         // What the adapter decided for each MSCAL as it read the stream (at the transfer's start, on the EE thread),
@@ -320,6 +353,7 @@ namespace tmb::native
             float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
             std::vector<float> pool;   // x, y, z per pool vertex (the object's space)
             uint64_t tex0 = 0;
+            std::vector<std::pair<uint8_t, uint64_t>> headerWrites; // the last material header's A+D (TEX0, TEX1, MIPTBP1)
             bool haveTexture = false;
             bool blended = false; // the strip's PRIM.ABE
             uint8_t code[16 * 1024] = {}; // VU1 micro memory as the stream's MPGs fill it
@@ -541,9 +575,13 @@ namespace tmb::native
             uint64_t tex0 = s.tex0;
             bool textured = s.haveTexture;
             if (header != 0u)
+                s.headerWrites.clear();
+            if (header != 0u)
                 for (uint32_t q = 0; q < 3u; ++q)
                 {
                     const uint32_t qw = 149u + header + q;
+                    s.headerWrites.emplace_back(static_cast<uint8_t>(s.vu.w(qw, 2) & 0xffu),
+                                                static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     logRegister("material", s.vu.w(qw, 2) & 0xffu, static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x4eu) // ZBUF_1
                         s.depthMasked = (s.vu.w(qw, 1) & 1u) != 0u;
@@ -760,6 +798,28 @@ namespace tmb::native
             }
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
+            // TMB_NATIVE_FROMGS=1: drawn by the GS front end with the GS's own state (its scissor, its targets), the
+            // material's registers written first (the header's A+D, ALPHA_1, TEST_1), as a sandboxed program's draws.
+            static const bool s_fromGs = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_FROMGS");
+                return value && (*value == '1' || *value == '2');
+            }();
+            if (s_fromGs && s.mode != Mode::Rain)
+            {
+                auto writes = std::make_shared<std::vector<std::pair<uint8_t, uint64_t>>>(s.headerWrites);
+                if (s.haveTexture)
+                    writes->emplace_back(0x06u, s.tex0);
+                // TMB_NATIVE_FROMGS=2: ALPHA_1 and TEST_1 as the adapter tracked them too (the GS has the DIRECTs').
+                if (std::getenv("TMB_NATIVE_FROMGS")[0] == '2')
+                {
+                    writes->emplace_back(0x42u, s.batchAlpha);
+                    writes->emplace_back(0x47u, s.batchTest);
+                }
+                material.fromGsContext = true;
+                material.alphaBlend = s.blended;
+                material.gsWrites = std::move(writes);
+            }
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
             ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain ? kScreenSpace : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
@@ -1335,28 +1395,19 @@ namespace tmb::native
     {
         if (!enabled())
             return;
-        g_vblanksSinceFrameEnd = 0;
+        g_lastMatchFrame = hostSeconds();
         updateSandboxAb();
+        updateTranslateAb();
         publish();
     }
 
-    // Each vblank: the menus (the shell overlay's loop) have no end of real-time processing; there the native frame
-    // is published empty (so the last match frame does not stay over them) once three vblanks went by without one.
-    void onVblank()
-    {
-        if (!enabled())
-            return;
-        ++g_vblanksSinceMenuFrame;
-        if (++g_vblanksSinceFrameEnd >= 3u && g_vblanksSinceMenuFrame >= 3u)
-            publish();
-    }
-
-    // A native frame end (timer 1 or sceGsSyncV) outside a match: the end of a menu frame; publishes what the sandbox drew of it.
+    // A native frame end (timer 1 or sceGsSyncV) outside a match: the end of a menu frame; publishes what the sandbox
+    // drew of it (empty with TMB_NATIVE_MENUS=0, so the last match frame does not stay over a menu).
     void onMenuFrameEnd()
     {
         if (!enabled() || inMatch())
             return;
-        g_vblanksSinceMenuFrame = 0;
+        g_lastMenuFrame = hostSeconds();
         if (++g_menuFrames % 500u == 0u)
         {
             std::fprintf(stderr, "[tmb:native] menus: 500 frames, %u programs on the sandbox\n", g_menuPrograms);
