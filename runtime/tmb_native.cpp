@@ -183,6 +183,8 @@ namespace tmb::native
             }
         }
 
+        bool inMatch();
+
         void updateTranslateAb()
         {
             static const double s_period = []
@@ -194,7 +196,7 @@ namespace tmb::native
                 return;
             static const auto s_start = std::chrono::steady_clock::now();
             const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
-            const bool on = static_cast<long long>(t / s_period) % 2 == 0;
+            const bool on = !inMatch() || static_cast<long long>(t / s_period) % 2 == 0; // in a match only
             if (on != g_translatePhase)
             {
                 g_translatePhase = on;
