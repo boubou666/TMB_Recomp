@@ -1114,8 +1114,9 @@ namespace tmb::native
                 const ps2x::native::Material &vm = s.checkMaterials.back();
                 const bool myDepthWrite = s.mode != Mode::Rain && !s.batchDepthMasked;
                 const bool myBlend = s.blended;
+                // Not the blend: the check's VU1 never gets the stream's DIRECT ALPHA (an ALPHA of 0 is opaque).
                 const bool vuBlend = vm.blend != ps2x::native::Material::Blend::Opaque;
-                if (myDepthWrite != vm.depthWrite || myBlend != vuBlend)
+                if (myDepthWrite != vm.depthWrite)
                 {
                     if (++s_stateDiffs[s.checkSetup] <= static_cast<uint64_t>(checkLimit()))
                         std::fprintf(stderr, "[tmb:check] setup 0x%x mode %d: state differs: mine depthWrite %d blend %d (alpha %#llx, depthMasked %d), VU1 depthWrite %d blend %d alphaTest %d\n",
