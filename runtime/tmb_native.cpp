@@ -420,6 +420,8 @@ namespace tmb::native
             uint64_t batchAlpha = 0x44;    // the ALPHA_1 of the batch being built
             bool fogged = false;           // the strip's PRIM.FGE
             uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it (before the game's own is known)
+            uint32_t prim = 0;             // PRIM as the stream's DIRECT and header A+D set it (a tag without PRE draws with it)
+            uint64_t preTags = 0, primTags = 0; // TMB_NATIVE_LOG_PRE: tags with PRE, without
             uint32_t batchFogColour = 0;
             bool depthMasked = false;      // ZBUF_1.ZMSK as the stream's DIRECT packets (or a strip's material) set it
             bool batchDepthMasked = false;
@@ -632,6 +634,8 @@ namespace tmb::native
                     s.headerWrites.emplace_back(static_cast<uint8_t>(s.vu.w(qw, 2) & 0xffu),
                                                 static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     logRegister("material", s.vu.w(qw, 2) & 0xffu, static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
+                    if ((s.vu.w(qw, 2) & 0xffu) == 0x00u) // PRIM
+                        s.prim = s.vu.w(qw, 0) & 0x7ffu;
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x4eu) // ZBUF_1
                         s.depthMasked = (s.vu.w(qw, 1) & 1u) != 0u;
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x06u) // TEX0_1
@@ -640,7 +644,15 @@ namespace tmb::native
                         textured = true;
                     }
                 }
-            const bool blended = ((tag1 >> 15) & 0x40u) != 0u, fogged = ((tag1 >> 15) & 0x20u) != 0u;
+            // The tag's PRIM only with PRE set; without it the GS draws with its PRIM register (PRMODECONT is 1).
+            const bool pre = ((tag1 >> 14) & 1u) != 0u;
+            const uint32_t attributes = pre ? (tag1 >> 15) & 0x7ffu : s.prim;
+            const bool blended = (attributes & 0x40u) != 0u, fogged = (attributes & 0x20u) != 0u;
+            ++(pre ? s.preTags : s.primTags);
+            static const bool s_logPre = std::getenv("TMB_NATIVE_LOG_PRE") != nullptr;
+            if (s_logPre && (s.preTags + s.primTags) % 20000u == 0u)
+                std::fprintf(stderr, "[tmb:native] strip tags: %llu with PRE, %llu without (PRIM %#x)\n",
+                             static_cast<unsigned long long>(s.preTags), static_cast<unsigned long long>(s.primTags), s.prim);
             if (fogged)
                 s.fogColour = gameFogColour(s.fogColour);
             if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended || (blended && s.alpha != s.batchAlpha) ||
@@ -1031,6 +1043,8 @@ namespace tmb::native
                                     s.alpha = value;
                                 else if (address == 0x3du)
                                     s.fogColour = static_cast<uint32_t>(value & 0xffffffu);
+                                else if (address == 0x00u)
+                                    s.prim = static_cast<uint32_t>(value & 0x7ffu);
                             }
                 }
                 else if (flg == 1u)
@@ -1240,7 +1254,9 @@ namespace tmb::native
                     else
                     {
                         const uint32_t pc = imm * 8u;
-                        const bool native = decide(s.lastSetupNative, s.code, pc) && inMatch();
+                        // The translated programs in the menus too (their 3D: the car and driver previews, the 2D
+                        // drawn by the same strip setups); TMB_NATIVE_MENUS=0 leaves the menus to VU1.
+                        const bool native = decide(s.lastSetupNative, s.code, pc) && (inMatch() || menusNative());
                         // TMB_NATIVE_VU1_PCS=<pc>[,<pc>...] (hex): setups left on the real VU1 (with their vertex passes and
                         // MSCNTs), the sandbox's reference.
                         static const std::vector<uint32_t> s_onVu1 = []
@@ -1300,7 +1316,7 @@ namespace tmb::native
                                     uint32_t lower = 0;
                                     if (pc + 8u <= sizeof(s.code))
                                         std::memcpy(&lower, s.code + pc, 4);
-                                    const uint64_t key = (static_cast<uint64_t>(pc) << 32) | lower;
+                                    const uint64_t key = (static_cast<uint64_t>(pc) << 32 | lower) ^ (inMatch() ? 1ull << 63 : 0u);
                                     // TMB_NATIVE_DUMP_CODE=<dir>: the code image of each program's first call, as
                                     // <dir>/vu1_<pc>.bin (for tools/vu_disasm.py).
                                     static const char *s_dumpDir = std::getenv("TMB_NATIVE_DUMP_CODE");
@@ -1315,8 +1331,8 @@ namespace tmb::native
                                         }
                                     }
                                     if (++s_counts[key] % 2000u == 1u)
-                                        std::fprintf(stderr, "[tmb:native] on VU1: %#x (lower %#x) x%u, last setup %s\n", pc, lower,
-                                                     s_counts[key], s.lastSetupNative ? "native" : "VU1");
+                                        std::fprintf(stderr, "[tmb:native] on VU1 (%s): %#x (lower %#x) x%u, last setup %s\n", inMatch() ? "match" : "menu",
+                                                     pc, lower, s_counts[key], s.lastSetupNative ? "native" : "VU1");
                                 }
                             }
                         }
