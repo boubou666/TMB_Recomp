@@ -3,9 +3,11 @@
 # TMB_Recomp
 
 **A native Linux and Windows port of *Twisted Metal: Black* (USA `SCUS-97101` and PAL `SCES-50360`): the whole game recompiled to C++ and run on the PC itself.**<br>
-Not an emulator. The game's MIPS code (EE), its sound driver (IOP) and its VU1 microcode all run as native code; its 3D is
-drawn by a PC renderer from the game's own meshes, matrices and textures, everything else it sends the GS is translated
-into OpenGL draws, its frames are paced and its sound mixed on the PC's clock.
+Not an emulator, and getting rid of what is left of one. The game's MIPS code (EE) and its sound driver (IOP) run as
+native code; its 3D is drawn by a PC renderer from the game's own meshes, matrices and textures; its frames are paced and
+its sound mixed on the PC's clock. Still emulated, and being removed: the VU1 programs not translated yet (menus,
+particles, beams), which a VU1 sandbox interprets, and the GS front end, which interprets the GS packets of the menus,
+HUD and 2D before drawing them with OpenGL.
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
@@ -64,8 +66,9 @@ path (`scripts/run_native.sh`, at twice the PS2's resolution) a match runs at 58
 | Frames paced on the PC's clock, not on the PS2's vblanks | ✅ |
 | Sound and music (989SND, movie audio) | ✅ |
 | Every IOP module recompiled (sound driver, pad, memory card...), sound mixed on the PC's clock (not tied to the frame rate) | ✅ |
-| Every VU1 draw native (translated programs plus the VU1 sandbox) | ✅ |
-| No GS emulation: menus, HUD, 2D and movies translated into OpenGL draws (the fork's GS native back end, no paraLLEl-GS) | ✅ |
+| The match's 3D drawn from the game's own data (translated VU1 programs) | ✅ |
+| Every VU1 program translated (still on the VU1 sandbox, which interprets VU1 microcode: the menus, particles, billboards, beams) | ⏳ |
+| No GS emulation (still: the GS front end interprets the GS packets of the menus, HUD, 2D and particles and keeps a copy of GS memory, drawn with OpenGL) | ⏳ |
 | Multi-player split screen (two controllers; `PS2X_PAD2_SCRIPT` for a scripted player 2) | ✅ |
 | Every arena and story level to the endings | 🔧 |
 | Higher internal resolution (`PS2X_GS_SCALE`, 2x by default) | ✅ |
@@ -94,9 +97,9 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 | Sound mixing (SPU2) | the SPU2 chip, at the IOP's pace | mixed when the PC's audio device asks (`PS2X_SPU2_WALLCLOCK=1`), with the IOP on the PC's clock (`PS2X_IOP_WALLCLOCK=1`): the sound no longer slows down with the frame rate |
 | 3D (hier renderer: terrain, buildings, cars, characters) | VU1 microprograms, then the GS | read from the game's own data as it is sent (meshes, matrices, lights, materials) and drawn by the native renderer (`runtime/tmb_native.cpp`, `TMB_NATIVE=1`); VU1 does not run them |
 | Skinned characters, sprites, rain, fog, blending | VU1, GS | translated into the native renderer's terms (bones, fog factor, blend modes) |
-| Other VU1 programs (particles, billboards, beams) | VU1 | run on the PC by a VU1 sandbox on the adapter's copy of VU memory, their GS packets drawn natively: every VU1 draw of a match is native |
-| Textures | GS memory | decoded on the PC from the game's own uploads, palettes included |
-| Menus, HUD, 2D, movies, everything else sent to the GS | GS, IPU | translated into OpenGL draws by the fork's GS native back end (no GS emulation, no paraLLEl-GS), the native 3D drawn into the same render targets in stream order; movies decoded with FFmpeg |
+| Other VU1 programs (menus, particles, billboards, beams) | VU1 | **still emulated**: a VU1 sandbox interprets their microcode on the adapter's copy of VU memory, and their GS packets go through the GS front end; to be translated like the 3D |
+| Textures | GS memory | decoded on the PC from the game's own uploads, palettes included, from a copy of GS memory kept in the PS2's layout (fed in the GS stream's order) |
+| Menus, HUD, 2D, movies, everything else sent to the GS | GS, IPU | **still emulated in part**: the fork's GS front end interprets the GS packets (its registers and memory layout) and draws them with OpenGL (the GS native back end, no paraLLEl-GS), the native 3D drawn into the same render targets in stream order; movies decoded with FFmpeg |
 
 ```
 disc files (game_us/, game/) ──► ps2_analyzer ──► recomp/tmb_scus97101.toml, tmb_sces50360.toml (+ recomp/tmb_manual.toml)

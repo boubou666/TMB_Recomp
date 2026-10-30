@@ -21,9 +21,11 @@
 #include "tmb_region.h" // TMB_REGION_US / TMB_REGION_PAL
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <string_view>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +35,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int key); // user32 (no windows.h next to raylib)
 
 namespace tmb::native
 {
@@ -184,6 +188,27 @@ namespace tmb::native
         }
 
         bool inMatch();
+
+        // TMB_NATIVE_FROMGS_KEY=1: F9 switches TMB_NATIVE_FROMGS (the GS's state and textures) on and off while playing,
+        // to compare a spot of the native frame with the GS's (a diagnostic, never a way of drawing).
+        std::atomic<bool> g_fromGsKey{false};
+
+        void updateFromGsKey()
+        {
+            static const bool s_on = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_FROMGS_KEY");
+                return value && *value == '1';
+            }();
+            if (!s_on)
+                return;
+            if (GetAsyncKeyState(0x78 /* VK_F9 */) & 1)
+            {
+                const bool on = !g_fromGsKey.load(std::memory_order_relaxed);
+                g_fromGsKey.store(on, std::memory_order_relaxed);
+                std::fprintf(stderr, "[tmb:native] F9: %s\n", on ? "GS state and textures (FROMGS)" : "native");
+            }
+        }
 
         void updateTranslateAb()
         {
@@ -338,6 +363,22 @@ namespace tmb::native
             uint32_t w(uint32_t qw, int lane) const { return words[(qw & 0x3ffu) * 4 + lane]; }
         };
 
+        const uint8_t *g_rdram = nullptr; // guest memory, from the first hier (setGuestMemory)
+
+        // The fog colour the GS fogs with: fogUpdate's A+D packet (FOGCOL, then register 0x3d), which the game sends
+        // outside the VIF1 stream. Until the game's memory is known, the stream's own DIRECT FOGCOL.
+        uint32_t gameFogColour(uint32_t streamColour)
+        {
+            if (!g_rdram)
+                return streamColour;
+            constexpr uint32_t kFogPacket = TMB_ADDR(0x004A25D0u);
+            if (g_rdram[(kFogPacket + 8u) & 0x1ffffffu] != 0x3du)
+                return streamColour;
+            uint32_t value;
+            std::memcpy(&value, g_rdram + (kFogPacket & 0x1ffffffu), sizeof(value));
+            return value & 0xffffffu;
+        }
+
         struct State
         {
             VuImage vu;
@@ -349,6 +390,12 @@ namespace tmb::native
             // were wrong in the copy, and their segments with them).
             bool sawMask = false, sawRow = false, sawCol = false, sawMode = false;
             std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
+            // TMB_NATIVE_CHECK=<n>: VU1's own program run beside the translation (checkTranslation), captured, not drawn.
+            std::unique_ptr<ps2x::native::Vu1Sandbox> check;
+            std::vector<ps2x::native::Vertex> checkVertices;
+            std::vector<ps2x::native::Material> checkMaterials;
+            uint32_t checkSetup = 0; // the translated setup the strips belong to
+            bool flushed = false;    // flush() ran (the check's way to tell a strip's own triangles)
             uint32_t sandboxSetup = 0;                         // the last setup the sandbox ran (statistics)
             bool setupOnVu1 = false;                           // TMB_NATIVE_VU1_PCS
             Mode mode = Mode::None;
@@ -372,7 +419,7 @@ namespace tmb::native
             uint64_t alpha = 0x44;         // ALPHA_1 as the stream's DIRECT packets set it (how blended draws blend)
             uint64_t batchAlpha = 0x44;    // the ALPHA_1 of the batch being built
             bool fogged = false;           // the strip's PRIM.FGE
-            uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it
+            uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it (before the game's own is known)
             uint32_t batchFogColour = 0;
             bool depthMasked = false;      // ZBUF_1.ZMSK as the stream's DIRECT packets (or a strip's material) set it
             bool batchDepthMasked = false;
@@ -594,6 +641,8 @@ namespace tmb::native
                     }
                 }
             const bool blended = ((tag1 >> 15) & 0x40u) != 0u, fogged = ((tag1 >> 15) & 0x20u) != 0u;
+            if (fogged)
+                s.fogColour = gameFogColour(s.fogColour);
             if (tex0 != s.tex0 || textured != s.haveTexture || blended != s.blended || (blended && s.alpha != s.batchAlpha) ||
                 fogged != s.fogged || (fogged && s.fogColour != s.batchFogColour) || s.depthMasked != s.batchDepthMasked ||
                 s.test != s.batchTest)
@@ -781,6 +830,7 @@ namespace tmb::native
 
         void flush(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
+            s.flushed = true;
             if (triangles.empty())
                 return;
             g_stats.triangles += triangles.size() / 3u;
@@ -807,13 +857,13 @@ namespace tmb::native
                 const char *value = std::getenv("TMB_NATIVE_FROMGS");
                 return value && (*value == '1' || *value == '2');
             }();
-            if (s_fromGs && s.mode != Mode::Rain)
+            if ((s_fromGs || g_fromGsKey.load(std::memory_order_relaxed)) && s.mode != Mode::Rain)
             {
                 auto writes = std::make_shared<std::vector<std::pair<uint8_t, uint64_t>>>(s.headerWrites);
                 if (s.haveTexture)
                     writes->emplace_back(0x06u, s.tex0);
                 // TMB_NATIVE_FROMGS=2: ALPHA_1 and TEST_1 as the adapter tracked them too (the GS has the DIRECTs').
-                if (std::getenv("TMB_NATIVE_FROMGS")[0] == '2')
+                if (s_fromGs && std::getenv("TMB_NATIVE_FROMGS")[0] == '2')
                 {
                     writes->emplace_back(0x42u, s.batchAlpha);
                     writes->emplace_back(0x47u, s.batchTest);
@@ -990,6 +1040,122 @@ namespace tmb::native
             }
         }
 
+        // TMB_NATIVE_CHECK=<n>: each translated strip's triangles (to the screen through the object's matrix) against the
+        // triangles VU1's own program draws from the same VU memory (run on a second sandbox, captured), in order: the
+        // count, then per vertex the GS position, Z, colour (alpha included) and texture coordinates; the first <n>
+        // differences per setup logged ([tmb:check]), and every 2000 strips a summary per setup.
+        ps2x::native::Screen screen();
+
+        long checkLimit()
+        {
+            static const long s_limit = []
+            {
+                const char *value = std::getenv("TMB_NATIVE_CHECK");
+                return value && *value ? std::atol(value) : 0L;
+            }();
+            return s_limit;
+        }
+
+        void checkTranslation(State &s, const ps2x::native::Vertex *mine, size_t mineCount)
+        {
+            struct Tally
+            {
+                uint64_t strips = 0, countDiffs = 0, vertexDiffs = 0;
+                long logged = 0;
+            };
+            static std::unordered_map<uint32_t, Tally> s_tally;
+            static uint64_t s_strips = 0;
+            Tally &t = s_tally[s.checkSetup];
+            ++t.strips;
+            const std::vector<ps2x::native::Vertex> &vu = s.checkVertices;
+            const auto screenOf = [&](const ps2x::native::Vertex &v, float out[3])
+            {
+                if (s.mode == Mode::Sprite || s.mode == Mode::Rain)
+                {
+                    out[0] = v.x, out[1] = v.y, out[2] = v.z;
+                    return;
+                }
+                const float *m = s.matrix;
+                const float c[4] = {m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12], m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13],
+                                    m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14], m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15]};
+                const float q = c[3] != 0.0f ? 1.0f / c[3] : 0.0f;
+                out[0] = c[0] * q, out[1] = c[1] * q, out[2] = c[2] * q * screen().gsZScale;
+                out[2] -= 16777216.0f * std::floor(out[2] / 16777216.0f); // XYZF2's 24 bits
+            };
+            const auto log = [&](const char *what, size_t i, const ps2x::native::Vertex *a, const ps2x::native::Vertex *b, const float *sa)
+            {
+                if (t.logged++ >= checkLimit())
+                    return;
+                std::fprintf(stderr, "[tmb:check] setup 0x%x mode %d: %s at vertex %zu: mine %zu tri, VU1 %zu", s.checkSetup,
+                             static_cast<int>(s.mode), what, i, mineCount / 3u, vu.size() / 3u);
+                if (a && b && sa)
+                    std::fprintf(stderr, " | mine xyz %.1f %.1f %.1f rgba %08x uv %.4f %.4f fog %.2f | VU1 xyz %.1f %.1f %.1f rgba %08x uv %.4f %.4f fog %.2f",
+                                 sa[0], sa[1], sa[2], a->rgba, a->u, a->v, a->fog, b->x, b->y, b->z, b->rgba, b->u, b->v, b->fog);
+                std::fprintf(stderr, "\n");
+            };
+            // The draw state: depth write, blending, alpha test (the translation's batch against VU1's material).
+            static std::unordered_map<uint32_t, uint64_t> s_stateDiffs;
+            if (!s.checkMaterials.empty() && mineCount > 0u)
+            {
+                const ps2x::native::Material &vm = s.checkMaterials.back();
+                const bool myDepthWrite = s.mode != Mode::Rain && !s.batchDepthMasked;
+                const bool myBlend = s.blended;
+                const bool vuBlend = vm.blend != ps2x::native::Material::Blend::Opaque;
+                if (myDepthWrite != vm.depthWrite || myBlend != vuBlend)
+                {
+                    if (++s_stateDiffs[s.checkSetup] <= static_cast<uint64_t>(checkLimit()))
+                        std::fprintf(stderr, "[tmb:check] setup 0x%x mode %d: state differs: mine depthWrite %d blend %d (alpha %#llx, depthMasked %d), VU1 depthWrite %d blend %d alphaTest %d\n",
+                                     s.checkSetup, static_cast<int>(s.mode), myDepthWrite ? 1 : 0, myBlend ? 1 : 0,
+                                     static_cast<unsigned long long>(s.batchAlpha), s.batchDepthMasked ? 1 : 0, vm.depthWrite ? 1 : 0,
+                                     vuBlend ? 1 : 0, vm.alphaTest ? 1 : 0);
+                }
+            }
+            if (mineCount != vu.size())
+            {
+                ++t.countDiffs;
+                log("triangle count differs", 0, nullptr, nullptr, nullptr);
+                // Why: the strip's vertices against the translation's pool (an index past it breaks the strip).
+                if (mineCount < vu.size() && t.logged <= checkLimit() && s.mode != Mode::Sprite && s.mode != Mode::SkinDirectional)
+                {
+                    const uint32_t top = s.top, nloop = s.vu.w(top, 0) & 0x7fffu;
+                    uint32_t outside = 0, maxIndex = 0;
+                    for (uint32_t v = 0; v < nloop; ++v)
+                    {
+                        const uint32_t index = s.vu.w(top + 1u + 3u * v, 3) & 0x7fffu;
+                        maxIndex = std::max(maxIndex, index);
+                        outside += static_cast<size_t>(index) * 3u + 2u >= s.pool.size() ? 1u : 0u;
+                    }
+                    std::fprintf(stderr, "[tmb:check]   strip: tag %08x %08x %08x %08x, %u vertices, pool %zu, %u indexes past it (max %u)\n",
+                                 s.vu.w(top, 0), s.vu.w(top, 1), s.vu.w(top, 2), s.vu.w(top, 3), nloop, s.pool.size() / 3u, outside, maxIndex);
+                }
+            }
+            const size_t n = std::min(mineCount, vu.size());
+            for (size_t i = 0; i < n; ++i)
+            {
+                float sa[3];
+                screenOf(mine[i], sa);
+                const ps2x::native::Vertex &b = vu[i];
+                const auto channel = [](uint32_t c, int k) { return static_cast<int>((c >> (8 * k)) & 0xffu); };
+                int colour = 0;
+                for (int k = 0; k < 4; ++k)
+                    colour = std::max(colour, std::abs(channel(mine[i].rgba, k) - channel(b.rgba, k)));
+                const float dz = std::fabs(sa[2] - b.z), zTol = std::max(2.0f, std::fabs(b.z) * 1e-3f);
+                const bool bad = std::fabs(sa[0] - b.x) > 0.6f || std::fabs(sa[1] - b.y) > 0.6f || dz > zTol || colour > 2 ||
+                                 std::fabs(mine[i].u - b.u) > 0.01f || std::fabs(mine[i].v - b.v) > 0.01f;
+                if (bad)
+                {
+                    ++t.vertexDiffs;
+                    log("vertex differs", i, &mine[i], &b, sa);
+                    break; // the first difference of the strip
+                }
+            }
+            if (++s_strips % 2000u == 0u)
+                for (const auto &[setup, tally] : s_tally)
+                    std::fprintf(stderr, "[tmb:check] setup 0x%x: %llu strips, %llu with another triangle count, %llu with a vertex differing\n",
+                                 setup, static_cast<unsigned long long>(tally.strips), static_cast<unsigned long long>(tally.countDiffs),
+                                 static_cast<unsigned long long>(tally.vertexDiffs));
+        }
+
         void runVif(State &s, const uint32_t *words, size_t count)
         {
             std::vector<ps2x::native::Vertex> triangles;
@@ -1056,6 +1222,19 @@ namespace tmb::native
                     }
                     if (cmd == 0x17 && s.mode == Mode::Sandbox)
                         s.sandbox->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
+                    else if (cmd == 0x17 && s.check && s.checkSetup != 0u && s.mode != Mode::None)
+                    {
+                        const size_t before = triangles.size();
+                        s.flushed = false;
+                        strip(s, triangles);
+                        // A material change flushes before the strip adds its own: then all that is there is its.
+                        const size_t from = s.flushed ? 0u : before;
+                        s.checkVertices.clear();
+                        s.checkMaterials.clear();
+                        s.check->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
+                        s.check->gif().flush();
+                        checkTranslation(s, triangles.data() + from, triangles.size() - from);
+                    }
                     else if (cmd == 0x17)
                         strip(s, triangles);
                     else
@@ -1157,6 +1336,16 @@ namespace tmb::native
                                 skinnedPass(s, pc == 0x0020u ? 3 : pc == 0x0030u ? 2 : 1);
                             else
                                 setup(s, pc);
+                            if (s.check && pc != 0x1d40u)
+                            {
+                                if (!matches(kVertexPasses, s.code, pc))
+                                    s.checkSetup = pc;
+                                s.checkVertices.clear();
+                                s.checkMaterials.clear();
+                                s.check->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
+                                              s.top, s.itops);
+                                s.check->gif().flush();
+                            }
                         }
                     }
                     break;
@@ -1253,6 +1442,11 @@ namespace tmb::native
         }
     }
 
+    void setGuestMemory(const uint8_t *rdram)
+    {
+        g_rdram = rdram;
+    }
+
     bool enabled()
     {
         static const bool on = []
@@ -1297,6 +1491,12 @@ namespace tmb::native
         {
             if (sandboxed())
                 state().sandbox = std::make_unique<ps2x::native::Vu1Sandbox>();
+            if (checkLimit() > 0)
+            {
+                State &st = state();
+                st.check = std::make_unique<ps2x::native::Vu1Sandbox>();
+                st.check->gif().setCapture(&st.checkVertices, &st.checkMaterials);
+            }
             ps2x::native::setVu1Gate(&drawnNatively);
             ps2x::native::setDirectGate(&directDrawnNatively);
             // In the GS stream where VU1's output would have been (with PS2X_GS_RENDERER=native: particles, the 2D
@@ -1334,11 +1534,47 @@ namespace tmb::native
     void patchFlareDepth(uint8_t *rdram, uint32_t image, uint32_t dest)
     {
         // TMB_NATIVE_FLARE_DEPTH=0: the flares keep the GS's samples (no depth read back from the native frame).
+        // With the native GS renderer (PS2X_GS_RENDERER=native, the default) the native frame is drawn into the GS's
+        // own targets, Z buffer included, so the GS's samples are right as they are; the native renderer's depth copy
+        // (present()) is then never refreshed, and its stale values made headlight flares shine through buildings.
         static const bool s_on = []
         {
             const char *value = std::getenv("TMB_NATIVE_FLARE_DEPTH");
-            return !(value && *value == '0');
+            const char *gs = std::getenv("PS2X_GS_RENDERER");
+            if (value && *value)
+                return *value != '0';
+            return !(gs && std::string_view(gs) == "native");
         }();
+        // TMB_NATIVE_LOG_FLARES=1: what the GS read back for the flares (format, size, the first samples), whether or not
+        // they are then replaced, every 50th read.
+        static const bool s_logGs = std::getenv("TMB_NATIVE_LOG_FLARES") != nullptr;
+        if (s_logGs)
+        {
+            static uint32_t s_reads = 0;
+            if (++s_reads % 50u == 1u)
+            {
+                uint64_t bitbltbuf = 0, trxpos = 0, trxreg = 0;
+                for (uint32_t q = 0; q < 7u; ++q)
+                {
+                    uint64_t value;
+                    std::memcpy(&value, rdram + ((image + q * 16u) & 0x1ffffffu), 8);
+                    const uint8_t address = rdram[(image + q * 16u + 8u) & 0x1ffffffu];
+                    if (address == 0x50u)
+                        bitbltbuf = value;
+                    else if (address == 0x51u)
+                        trxpos = value;
+                    else if (address == 0x52u)
+                        trxreg = value;
+                }
+                uint32_t first[4];
+                std::memcpy(first, rdram + (dest & 0x1ffffffu), sizeof(first));
+                std::fprintf(stderr, "[tmb:flare] GS read sbp %#llx psm %#llx at (%llu, %llu) %llux%llu: %08x %08x %08x %08x%s\n",
+                             static_cast<unsigned long long>(bitbltbuf & 0x3fffu), static_cast<unsigned long long>((bitbltbuf >> 24) & 0x3fu),
+                             static_cast<unsigned long long>(trxpos & 0x7ffu), static_cast<unsigned long long>((trxpos >> 16) & 0x7ffu),
+                             static_cast<unsigned long long>(trxreg & 0xfffu), static_cast<unsigned long long>((trxreg >> 32) & 0xfffu),
+                             first[0], first[1], first[2], first[3], s_on ? " (then replaced)" : "");
+            }
+        }
         if (!s_on || !enabled() || !inMatch() || !state().sandbox)
             return;
         ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
@@ -1400,6 +1636,7 @@ namespace tmb::native
         g_lastMatchFrame = hostSeconds();
         updateSandboxAb();
         updateTranslateAb();
+        updateFromGsKey();
         publish();
     }
 

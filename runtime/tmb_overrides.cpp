@@ -50,6 +50,7 @@ namespace tmb::native
     void onFrameEnd();
     void onMenuFrameEnd();
     void patchFlareDepth(uint8_t *rdram, uint32_t image, uint32_t dest);
+    void setGuestMemory(const uint8_t *rdram);
     bool enabled();
 }
 
@@ -659,6 +660,7 @@ namespace
     void hierOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         updateGsLag(rdram, runtime);
+        tmb::native::setGuestMemory(rdram); // the adapter reads the game's fog packet
         const auto start = std::chrono::steady_clock::now();
         timelineEvent('H');
         hier__Fi_0x1d40b0(rdram, ctx, runtime);
@@ -851,6 +853,31 @@ namespace
     {
         const uint32_t image = getRegU32(ctx, 4), dest = getRegU32(ctx, 5), ra = getRegU32(ctx, 31);
         sceGsExecStoreImage_0x2055e8(rdram, ctx, runtime);
+        // TMB_LOG_STOREIMAGE=1: each GS readback's caller (ra) and first words, every 100th per caller.
+        static const bool s_log = std::getenv("TMB_LOG_STOREIMAGE") != nullptr;
+        if (s_log)
+        {
+            static std::unordered_map<uint32_t, uint32_t> s_calls;
+            if (++s_calls[ra] % 100u == 1u)
+            {
+                uint64_t bitbltbuf = 0, trxreg = 0;
+                for (uint32_t q = 0; q < 7u; ++q)
+                {
+                    uint64_t value;
+                    std::memcpy(&value, rdram + ((image + q * 16u) & 0x1FFFFFFu), 8);
+                    const uint8_t address = rdram[(image + q * 16u + 8u) & 0x1FFFFFFu];
+                    if (address == 0x50u)
+                        bitbltbuf = value;
+                    else if (address == 0x52u)
+                        trxreg = value;
+                }
+                uint32_t first[2];
+                std::memcpy(first, rdram + (dest & 0x1FFFFFFu), sizeof(first));
+                std::fprintf(stderr, "[tmb:storeimage] ra %#x (call %u) sbp %#llx psm %#llx %llux%llu: %08x %08x\n", ra, s_calls[ra],
+                             static_cast<unsigned long long>(bitbltbuf & 0x3FFFu), static_cast<unsigned long long>((bitbltbuf >> 24) & 0x3Fu),
+                             static_cast<unsigned long long>(trxreg & 0xFFFu), static_cast<unsigned long long>((trxreg >> 32) & 0xFFFu), first[0], first[1]);
+            }
+        }
         if (ra >= kLensFlareTestZbuffer && ra < kLensFlareTestZbufferEnd)
             tmb::native::patchFlareDepth(rdram, image, dest);
     }
@@ -918,11 +945,15 @@ namespace
         g_hierMs = g_updateMs = 0;
     }
 
+    double hitchClock();
+    std::atomic<double> g_lastMatchFrameNoted{-1.0}; // the fps overlay's last match frame (hitchClock)
+
     void timerEndOfRealTimeProcessingOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_runtime = runtime;
         timelineEvent('E');
         runtime->noteGameFrame(); // the fps overlay
+        g_lastMatchFrameNoted.store(hitchClock(), std::memory_order_relaxed);
         noteVblankHoldFrame(runtime); // TMB_VBLANK_HOLD: the frame's processing is done
         // TMB_PLAYER_HEALTH_CAP=<x> (testing): the player car's health (vehicle 0x259c70, float at +1012; +1008 is
         // what gameCheckPlayerHealth sets it to) held at most x, so a few hits end a life: the game-over
@@ -1095,6 +1126,9 @@ namespace
         tmb::native::onMenuFrameEnd(); // TMB_NATIVE: publishes a menu frame's native draws (not in a match)
         const double step = pacer.frameEnd();
         g_lastFrameEndSeconds.store(hitchClock(), std::memory_order_relaxed);
+        // The fps overlay in the menus (a match's frames are counted at timerEndOfRealTimeProcessing).
+        if (hitchClock() - g_lastMatchFrameNoted.load(std::memory_order_relaxed) > 0.5)
+            runtime->noteGameFrame();
         // TMB_TRACE_HITCH=<ms>: each game frame longer than that (from one frame end to the next), with when it ended.
         static const double s_hitchSeconds = []
         {
@@ -1498,6 +1532,18 @@ namespace
     // path (TMB_NATIVE=0) and on the native one, the same effects come at about the same moments, to compare. The call
     // is made at particleMove's entry (once a frame, the game's own place for particles) and returns to kFxTestReturn
     // (padding before a function, never executed), which then runs particleMove as it was called.
+    // TMB_NO_AI=1 (testing): the computer's vehicles do nothing, so a player can drive around an arena undisturbed,
+    // to look at it: Vehicle::aiUpdateInputs (each bot's pad, every frame) runs the game's own
+    // aiUpdateFrozenInput instead (no throttle, no steering, no firing).
+    constexpr uint32_t kAiUpdateInputs = TMB_ADDR(0x00101480u);
+    constexpr uint32_t kAiUpdateFrozenInput = TMB_ADDR(0x001017C8u);
+
+    void aiUpdateInputsFrozen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = kAiUpdateFrozenInput;
+        aiUpdateFrozenInput__7Vehicle_0x1017c8(rdram, ctx, runtime);
+    }
+
     constexpr uint32_t kParticleMove = TMB_ADDR(0x001E6368u);
     constexpr uint32_t kParticleCreateFx = TMB_ADDR(0x001E7820u);
     constexpr uint32_t kFxTestReturn = TMB_ADDR(0x00100264u);
@@ -1671,6 +1717,8 @@ namespace
             runtime.registerFunction(TMB_ADDR(0x00204D90u), &sceGsSyncVTimeline);
         }
         runtime.registerFunction(kSubstepReturn, &substepReturn);
+        if (const char *noAi = std::getenv("TMB_NO_AI"); noAi && *noAi == '1')
+            runtime.registerFunction(kAiUpdateInputs, &aiUpdateInputsFrozen);
         if (const char *fx = std::getenv("TMB_FX_TEST"); fx && *fx)
         {
             g_fxTest.period = std::max(0.5, std::atof(fx));
