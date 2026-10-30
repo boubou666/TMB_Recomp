@@ -36,8 +36,6 @@
 #include <unordered_map>
 #include <vector>
 
-extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int key); // user32 (no windows.h next to raylib)
-
 namespace tmb::native
 {
     namespace
@@ -53,6 +51,7 @@ namespace tmb::native
             Sprite, // camera-facing quads (glows, smoke, light halos): 0x3000, one per MSCNT
             Rain,   // the effects image's rain lines (0x1d40)
             Ribbon, // beams and trails (0x3270): two screen-space vertices per point, a triangle strip
+            Reflective, // chrome, glass and water strips (0x1db8): environment-mapped, alpha by the view angle
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
             Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
         };
@@ -67,6 +66,7 @@ namespace tmb::native
             case 0x1700: return Mode::Point;
             case 0x3000: return Mode::Sprite;
             case 0x3270: return Mode::Ribbon;
+            case 0x1db8: return Mode::Reflective;
             case 0x0050:
             case 0x0070: return Mode::SkinDirectional;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
@@ -86,7 +86,8 @@ namespace tmb::native
         };
         constexpr Program kSetups[] = {{0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u}, {0x0d08u, 0x420f01dfu},
                                        {0x1700u, 0x420f00a0u}, {0x0050u, 0x420f0376u}, {0x0070u, 0x420f0372u},
-                                       {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}, {0x3270u, 0x420f0532u}};
+                                       {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}, {0x3270u, 0x420f0532u},
+                                       {0x1db8u, 0x420f07c9u}};
         constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
                                              {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
@@ -191,27 +192,6 @@ namespace tmb::native
 
         bool inMatch();
 
-        // TMB_NATIVE_FROMGS_KEY=1: F9 switches TMB_NATIVE_FROMGS (the GS's state and textures) on and off while playing,
-        // to compare a spot of the native frame with the GS's (a diagnostic, never a way of drawing).
-        std::atomic<bool> g_fromGsKey{false};
-
-        void updateFromGsKey()
-        {
-            static const bool s_on = []
-            {
-                const char *value = std::getenv("TMB_NATIVE_FROMGS_KEY");
-                return value && *value == '1';
-            }();
-            if (!s_on)
-                return;
-            if (GetAsyncKeyState(0x78 /* VK_F9 */) & 1)
-            {
-                const bool on = !g_fromGsKey.load(std::memory_order_relaxed);
-                g_fromGsKey.store(on, std::memory_order_relaxed);
-                std::fprintf(stderr, "[tmb:native] F9: %s\n", on ? "GS state and textures (FROMGS)" : "native");
-            }
-        }
-
         void updateTranslateAb()
         {
             static const double s_period = []
@@ -251,10 +231,8 @@ namespace tmb::native
         double g_lastMatchFrame = -1.0, g_lastMenuFrame = -1.0;
         bool inMatch() { return g_lastMatchFrame >= 0.0 && hostSeconds() - g_lastMatchFrame < 0.1; }
 
-        // The menus' VU1 programs on the sandbox too (TMB_NATIVE_MENUS=0: left to VU1 and the GS). Their frames end at
-        // sceGsSyncV (onMenuFrameEnd, with native frames), and their draws go to the GS front end with their packets'
-        // register writes (GifToNative::setGsWrites): the menus set their own screen, textures and targets, which the
-        // GS then has as it would.
+        // The menus natively too (TMB_NATIVE_MENUS=0: left to VU1 and the GS): they only run the translated strip
+        // setups 0xd08 and 0xcc8. Their frames end at sceGsSyncV (onMenuFrameEnd, with native frames).
         uint32_t g_menuFrames = 0, g_menuPrograms = 0; // logged every 500 menu frames
         bool menusNative()
         {
@@ -404,7 +382,6 @@ namespace tmb::native
             float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
             std::vector<float> pool;   // x, y, z per pool vertex (the object's space)
             uint64_t tex0 = 0;
-            std::vector<std::pair<uint8_t, uint64_t>> headerWrites; // the last material header's A+D (TEX0, TEX1, MIPTBP1)
             bool haveTexture = false;
             bool blended = false; // the strip's PRIM.ABE
             uint8_t code[16 * 1024] = {}; // VU1 micro memory as the stream's MPGs fill it
@@ -423,6 +400,9 @@ namespace tmb::native
             bool fogged = false;           // the strip's PRIM.FGE
             uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it (before the game's own is known)
             uint32_t prim = 0;             // PRIM as the stream's DIRECT and header A+D set it (a tag without PRE draws with it)
+            float reflect[3] = {};         // 0x1db8's alpha terms (its setup's TOP .yzw: base, slope, floor)
+            bool water = false;            // 0x1db8 with all three 0: the water variant (0x2208)
+            bool reflectParams = false;    // 0x1db8's next MSCNT is its parameter step (0xf50 -> 0x1de0), not a strip
             uint64_t preTags = 0, primTags = 0; // TMB_NATIVE_LOG_PRE: tags with PRE, without
             uint32_t batchFogColour = 0;
             bool depthMasked = false;      // ZBUF_1.ZMSK as the stream's DIRECT packets (or a strip's material) set it
@@ -515,10 +495,12 @@ namespace tmb::native
             // The rigid strip programs scale z / w by VU 4.z, the object's depth factor (MULz.z vf24, vf19z at 0x1018,
             // 0x1188, 0x1460, 0x16c8), as the sprites do (sprite() applies it itself): without it the scenery sat at
             // another depth than the glows and smoke drawn over it, and cut them. The skinned strips do not scale.
-            if (s.mode == Mode::Unlit || s.mode == Mode::Scaled || s.mode == Mode::Directional || s.mode == Mode::Point)
+            if (s.mode == Mode::Unlit || s.mode == Mode::Scaled || s.mode == Mode::Directional || s.mode == Mode::Point ||
+                s.mode == Mode::Reflective)
                 for (int j = 0; j < 4; ++j)
                     s.matrix[j * 4 + 2] *= s.vu.f(4, 2);
             s.haveTexture = false;
+            s.reflectParams = s.mode == Mode::Reflective;
         }
 
         // An object's key for interpolation (Renderer::setKey): its setup, its vertex count and its pool's words as
@@ -628,13 +610,9 @@ namespace tmb::native
             uint64_t tex0 = s.tex0;
             bool textured = s.haveTexture;
             if (header != 0u)
-                s.headerWrites.clear();
-            if (header != 0u)
                 for (uint32_t q = 0; q < 3u; ++q)
                 {
                     const uint32_t qw = 149u + header + q;
-                    s.headerWrites.emplace_back(static_cast<uint8_t>(s.vu.w(qw, 2) & 0xffu),
-                                                static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     logRegister("material", s.vu.w(qw, 2) & 0xffu, static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x00u) // PRIM
                         s.prim = s.vu.w(qw, 0) & 0x7ffu;
@@ -855,10 +833,113 @@ namespace tmb::native
             }
         }
 
+        // A reflective strip (0x1db8, its MSCNTs from 0x1ec8, the water's from 0x2248): the strips' layout (vertex k at
+        // TOP + 1 + 3k: normal, pool index in w; colour; texture coordinates, rewritten here), positions from the pool.
+        // The first MSCNT after the vertex pass only reads the alpha terms (parameter step). Then for each vertex:
+        // the eye vector e = (p + R^T t) / w (VU 0-2 the object's rotation, VU 3 its translation, w the screen matrix's,
+        // which the vertex pass leaves in the pool's w as 1 / w) is reflected about the
+        // normal n = 1.00787 - b / 127 (the water's first bent by a wave: n.xy += 0.125 (s - s^3) - 0.03125, s = 2 frac(VU
+        // 21.z + p.xy (0.019, 0.021)) - 1): r = e - 2 (e.n) n. The texture coordinates are 0.5 + 0.414 r taken to the
+        // world (VU 0-2) along x and z (the water's x and y), Q 1. Alpha times max(base + slope (e.n), floor) (the water's
+        // 1, 2, 0.1875), then the colour times VU 5 plus VU 20. VU1 also cuts triangles that cross the clip volume
+        // (0x26e0); the GPU clips them here.
+        void reflectiveStrip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            if (s.reflectParams)
+            {
+                // The MSCNT after the vertex pass: the alpha terms from its TOP (.yzw), all three 0 for the water.
+                s.reflectParams = false;
+                for (int k = 0; k < 3; ++k)
+                    s.reflect[k] = vu.f(top, 1 + k);
+                s.water = s.reflect[0] + s.reflect[1] + s.reflect[2] == 0.0f; // FSAND 0x001 after their sum (0x1e58)
+                return;
+            }
+            ++g_stats.strips;
+            if (!useMaterial(s, top, vu.w(top, 3), triangles))
+                return;
+            const uint32_t nloop = vu.w(top, 0) & 0x7fffu;
+            float eyeOffset[3];
+            for (int j = 0; j < 3; ++j)
+                eyeOffset[j] = vu.f(j, 0) * vu.f(3, 0) + vu.f(j, 1) * vu.f(3, 1) + vu.f(j, 2) * vu.f(3, 2);
+            const int vAxis = s.water ? 1 : 2;
+            const float base = s.water ? 1.0f : s.reflect[0], slope = s.water ? 2.0f : s.reflect[1], floor = s.water ? 0.1875f : s.reflect[2];
+            std::vector<ps2x::native::Vertex> strip;
+            strip.reserve(nloop);
+            for (uint32_t v = 0; v < nloop; ++v)
+            {
+                const uint32_t q = top + 1u + 3u * v;
+                const uint32_t index = vu.w(q, 3) & 0x7fffu;
+                ps2x::native::Vertex out;
+                if (static_cast<size_t>(index) * 3u + 2u >= s.pool.size())
+                {
+                    strip.push_back(out);
+                    strip.back().rgba = 0xdeadu;
+                    continue;
+                }
+                const float *pos = &s.pool[index * 3u];
+                out.x = pos[0];
+                out.y = pos[1];
+                out.z = pos[2];
+                // The vertex pass left 1 / w (the screen matrix's) in the pool's w (0xf18): e is scaled by it.
+                const float w = s.matrix[3] * pos[0] + s.matrix[7] * pos[1] + s.matrix[11] * pos[2] + s.matrix[15];
+                const float depthQ = w != 0.0f ? 1.0f / w : 0.0f;
+                float n[3], e[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    n[k] = 1.00787f - static_cast<float>(static_cast<int32_t>(vu.w(q, k))) * 0.00787402f;
+                    e[k] = (pos[k] + eyeOffset[k]) * depthQ;
+                }
+                if (s.water)
+                {
+                    const float scale[2] = {0.019f, 0.021f};
+                    for (int k = 0; k < 2; ++k)
+                    {
+                        const float x = vu.f(21, 2) + pos[k] * scale[k];
+                        const float wave = 2.0f * (x - 0.5f) - 2.0f * std::trunc(x);
+                        n[k] += 0.125f * (wave - wave * wave * wave) - 0.03125f;
+                    }
+                }
+                const float d = e[0] * n[0] + e[1] * n[1] + e[2] * n[2];
+                float r[3];
+                for (int k = 0; k < 3; ++k)
+                    r[k] = e[k] - 2.0f * d * n[k];
+                out.u = 0.5f + 0.414062f * (vu.f(0, 0) * r[0] + vu.f(1, 0) * r[1] + vu.f(2, 0) * r[2]);
+                out.v = 0.5f + 0.414062f * (vu.f(0, vAxis) * r[0] + vu.f(1, vAxis) * r[1] + vu.f(2, vAxis) * r[2]);
+                const float fade = std::max(base + slope * d, floor);
+                float c[4];
+                for (int k = 0; k < 4; ++k)
+                {
+                    float value = static_cast<float>(static_cast<int32_t>(vu.w(q + 1, k)));
+                    if (k == 3)
+                        value *= fade;
+                    c[k] = std::min(value * vu.f(5, k) + vu.f(20, k), 255.0f);
+                }
+                out.rgba = clampByte(c[0]) | (clampByte(c[1]) << 8) | (clampByte(c[2]) << 16) | (clampByte(c[3]) << 24);
+                // The setup put VU 21.z where the vertex pass's fog takes VU 21.x (ADDz.x vf18 at 0x1dc8).
+                out.fog = w > 0.0f ? std::min(std::max(vu.f(4, 3) + vu.f(21, 2) + vu.f(21, 3) / w, 0.0f), vu.f(21, 1)) / 255.0f : 0.0f;
+                strip.push_back(out);
+            }
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                if (strip[i].rgba == 0xdeadu || strip[i - 1].rgba == 0xdeadu || strip[i - 2].rgba == 0xdeadu)
+                    continue;
+                triangles.push_back(strip[i - 2]);
+                triangles.push_back(strip[i - 1]);
+                triangles.push_back(strip[i]);
+            }
+        }
+
         void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             if (s.mode == Mode::None)
                 return;
+            if (s.mode == Mode::Reflective)
+            {
+                reflectiveStrip(s, triangles);
+                return;
+            }
             if (s.mode == Mode::Ribbon)
             {
                 ribbon(s, triangles);
@@ -952,28 +1033,6 @@ namespace tmb::native
             }
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
-            // TMB_NATIVE_FROMGS=1: drawn by the GS front end with the GS's own state (its scissor, its targets), the
-            // material's registers written first (the header's A+D, ALPHA_1, TEST_1), as a sandboxed program's draws.
-            static const bool s_fromGs = []
-            {
-                const char *value = std::getenv("TMB_NATIVE_FROMGS");
-                return value && (*value == '1' || *value == '2');
-            }();
-            if ((s_fromGs || g_fromGsKey.load(std::memory_order_relaxed)) && s.mode != Mode::Rain)
-            {
-                auto writes = std::make_shared<std::vector<std::pair<uint8_t, uint64_t>>>(s.headerWrites);
-                if (s.haveTexture)
-                    writes->emplace_back(0x06u, s.tex0);
-                // TMB_NATIVE_FROMGS=2: ALPHA_1 and TEST_1 as the adapter tracked them too (the GS has the DIRECTs').
-                if (s_fromGs && std::getenv("TMB_NATIVE_FROMGS")[0] == '2')
-                {
-                    writes->emplace_back(0x42u, s.batchAlpha);
-                    writes->emplace_back(0x47u, s.batchTest);
-                }
-                material.fromGsContext = true;
-                material.alphaBlend = s.blended;
-                material.gsWrites = std::move(writes);
-            }
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
             ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon ? kScreenSpace : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
@@ -1345,11 +1404,8 @@ namespace tmb::native
                     else
                     {
                         const uint32_t pc = imm * 8u;
-                        // The translated programs in the menus too (their 3D: the car and driver previews, the 2D
-                        // drawn by the same strip setups); TMB_NATIVE_MENUS=0 leaves the menus to VU1.
-                        const bool native = decide(s.lastSetupNative, s.code, pc) && (inMatch() || menusNative());
                         // TMB_NATIVE_VU1_PCS=<pc>[,<pc>...] (hex): setups left on the real VU1 (with their vertex passes and
-                        // MSCNTs), the sandbox's reference.
+                        // MSCNTs), the reference for the sandbox and the translations.
                         static const std::vector<uint32_t> s_onVu1 = []
                         {
                             std::vector<uint32_t> pcs;
@@ -1364,6 +1420,14 @@ namespace tmb::native
                         }();
                         if (!matches(kVertexPasses, s.code, pc))
                             s.setupOnVu1 = std::find(s_onVu1.begin(), s_onVu1.end(), pc) != s_onVu1.end();
+                        // The translated programs in the menus too (their 3D: the car and driver previews, the 2D
+                        // drawn by the same strip setups); TMB_NATIVE_MENUS=0 leaves the menus to VU1. A setup in
+                        // TMB_NATIVE_VU1_PCS stays on VU1 even when translated (a PS2X_VU1_RECORD reference).
+                        bool native = false;
+                        if (s.setupOnVu1)
+                            s.lastSetupNative = false;
+                        else
+                            native = decide(s.lastSetupNative, s.code, pc) && (inMatch() || menusNative());
                         const bool menus = menusNative();
                         const bool sandbox = !native && s.sandbox && g_sandboxPhase && (inMatch() || menus) && !s.setupOnVu1;
                         noteDecision(pc, native || sandbox);
@@ -1380,13 +1444,7 @@ namespace tmb::native
                                 if (!matches(kVertexPasses, s.code, pc))
                                     s.sandboxSetup = pc;
                                 s.sandbox->gif().setSource((s.sandboxSetup << 16) | pc); // its setup and itself
-                                // TMB_NATIVE_GSWRITES=1: in a match too (the GS's scissor, textures and blending).
-                                static const bool s_gsWrites = []
-                                {
-                                    const char *value = std::getenv("TMB_NATIVE_GSWRITES");
-                                    return value && *value == '1';
-                                }();
-                                s.sandbox->gif().setGsWrites(menus || s_gsWrites);
+                                s.sandbox->gif().setGsWrites(false); // drawn by the native renderer, never the GS's state
                                 g_menuPrograms += menus ? 1u : 0u;
                                 s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
                                                 s.top, s.itops);
@@ -1743,7 +1801,6 @@ namespace tmb::native
         g_lastMatchFrame = hostSeconds();
         updateSandboxAb();
         updateTranslateAb();
-        updateFromGsKey();
         publish();
     }
 
