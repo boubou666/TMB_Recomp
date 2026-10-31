@@ -5,9 +5,9 @@
 **A native Linux and Windows port of *Twisted Metal: Black* (USA `SCUS-97101` and PAL `SCES-50360`): the whole game recompiled to C++ and run on the PC itself.**<br>
 Not an emulator, and getting rid of what is left of one. The game's MIPS code (EE) and its sound driver (IOP) run as
 native code; its 3D is drawn by a PC renderer from the game's own meshes, matrices and textures; its frames are paced and
-its sound mixed on the PC's clock. Still emulated, and being removed: the VU1 programs not translated yet (menus,
-particles, beams), which a VU1 sandbox interprets, and the GS front end, which interprets the GS packets of the menus,
-HUD and 2D before drawing them with OpenGL.
+its sound mixed on the PC's clock. Every VU1 program the game runs is native C++ (no VU1 interpreter, no sandbox).
+Still emulated, and being removed: the GS front end, which interprets the GS packets of the menus, HUD and 2D before
+drawing them with OpenGL (the game's DIRECT packets in a match are drawn natively from their GIF data).
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
@@ -67,7 +67,7 @@ path (`scripts/run_native.sh`, at twice the PS2's resolution) a match runs at 58
 | Sound and music (989SND, movie audio) | ✅ |
 | Every IOP module recompiled (sound driver, pad, memory card...), sound mixed on the PC's clock (not tied to the frame rate) | ✅ |
 | The match's 3D drawn from the game's own data (translated VU1 programs) | ✅ |
-| Every VU1 program translated (still on the VU1 sandbox, which interprets VU1 microcode: the menus, particles, billboards, beams) | ⏳ |
+| Every VU1 program translated (menus, 3D, beams, chrome and water, particles, flares, trails, heat haze, lightning): no VU1 sandbox | ✅ |
 | No GS emulation (still: the GS front end interprets the GS packets of the menus, HUD, 2D and particles and keeps a copy of GS memory, drawn with OpenGL) | ⏳ |
 | Multi-player split screen (two controllers; `PS2X_PAD2_SCRIPT` for a scripted player 2) | ✅ |
 | Every arena and story level to the endings | 🔧 |
@@ -97,7 +97,7 @@ program piece by piece. Each piece below replaces a part of the PS2 that was sim
 | Sound mixing (SPU2) | the SPU2 chip, at the IOP's pace | mixed when the PC's audio device asks (`PS2X_SPU2_WALLCLOCK=1`), with the IOP on the PC's clock (`PS2X_IOP_WALLCLOCK=1`): the sound no longer slows down with the frame rate |
 | 3D (hier renderer: terrain, buildings, cars, characters) | VU1 microprograms, then the GS | read from the game's own data as it is sent (meshes, matrices, lights, materials) and drawn by the native renderer (`runtime/tmb_native.cpp`, `TMB_NATIVE=1`); VU1 does not run them |
 | Skinned characters, sprites, rain, fog, blending | VU1, GS | translated into the native renderer's terms (bones, fog factor, blend modes) |
-| Other VU1 programs (menus, particles, billboards, beams) | VU1 | **still emulated**: a VU1 sandbox interprets their microcode on the adapter's copy of VU memory, and their GS packets go through the GS front end; to be translated like the 3D |
+| Effects VU1 programs (beams, chrome and water, particles, flares, streaks, trails, heat haze, lightning) | VU1 | one native function per program, each derived from VU1 recordings and checked against VU1's own output (`TMB_NATIVE_CHECK`); a program not translated is not run at all (reported once) |
 | Textures | GS memory | decoded on the PC from the game's own uploads, palettes included, from a copy of GS memory kept in the PS2's layout (fed in the GS stream's order) |
 | Menus, HUD, 2D, movies, everything else sent to the GS | GS, IPU | **still emulated in part**: the fork's GS front end interprets the GS packets (its registers and memory layout) and draws them with OpenGL (the GS native back end, no paraLLEl-GS), the native 3D drawn into the same render targets in stream order; movies decoded with FFmpeg |
 
@@ -109,7 +109,7 @@ disc files (game_us/, game/) ──► ps2_analyzer ──► recomp/tmb_scus971
                                            │
                  CMakeLists.txt ──► PS2Recomp runtime + generated code + runtime/ (TMB's overrides, native adapter)
                                            │
-   native renderer · VU1 sandbox · texture cache · SPU2 mixer on the PC clock ─┼─► ps2EntryRunner
+   native renderer · texture cache · SPU2 mixer on the PC clock ──────────────┼─► ps2EntryRunner
    GS native back end (the GS stream as OpenGL draws) · window presentation on the GPU, at 2x
    what is left of the PS2: EE kernel HLE · DMAC · GIF / VIF packet handling · IPU · IOP kernel and other modules
 ```
@@ -126,7 +126,7 @@ disc files (game_us/, game/) ──► ps2_analyzer ──► recomp/tmb_scus971
 - PS2Recomp turns every function into C++ and emits the address-indexed function table.
 - `runtime/tmb_native.cpp` is TMB's native adapter: it reads every VIF1 stream the game sends and draws it natively,
   and tells VU1 which programs to skip. The generic parts live in the fork (`ps2xRuntime/src/lib/native/`: renderer,
-  texture cache, VU1 sandbox, GIF translation; `docs/native.md`), shared with the other ports.
+  texture cache, GIF translation; `docs/native.md`), shared with the other ports.
 - `runtime/tmb_overrides.cpp` holds the other game-specific bindings.
 
 The PS2Recomp fork lives in `PS2Recomp/` (git submodule, [boubou666/PS2Recomp](https://github.com/boubou666/PS2Recomp)),
@@ -211,9 +211,9 @@ key positions):
 | `TMB_NATIVE_FRAMES=0` | Frames on the emulated vblanks instead of the PC clock |
 | `PS2X_GS_SCALE=<n>` | With `TMB_NATIVE=1`: the internal resolution, n times the PS2's each way (1 to 4, default 2) |
 | `PS2X_WINDOW_SIZE=<w>x<h>` | The window's size when it opens |
-| `TMB_NATIVE_SANDBOX=0` | The VU1 programs the adapter does not translate stay on VU1 and the GS (default: the VU1 sandbox runs them, drawn natively) |
 | `TMB_NATIVE_VU1=1` | VU1 runs the translated programs too (the GS frame then has everything, to compare) |
-| `TMB_NATIVE_VU1_PCS=<pc,...>` / `TMB_NATIVE_SANDBOX_PCS=<pc,...>` | Leave those setups on VU1 / run translated ones on the sandbox (to compare a program with VU1) |
+| `TMB_NATIVE_VU1_PCS=<pc,...>` | Diagnostic: leave those setups on VU1 (a `PS2X_VU1_RECORD` reference for a translation) |
+| `TMB_NATIVE_CHECK=<n>` | Diagnostic: run VU1's own program beside each translation (an interpreter, off in play) and log where they differ |
 | `PS2X_NATIVE_VIEW=only` | Show the native frame alone, without the GS one under it |
 | `PS2X_NATIVE_INTERPOLATE=1`, `PS2X_PRESENT_FPS=<n>` | Draw frames between the game's 50 (objects interpolated), presented at up to n per second |
 | `PS2X_IOP_NATIVE=1` | Run the recompiled sound driver (`scripts/iop_recomp.sh` generates it) |

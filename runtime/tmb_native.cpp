@@ -21,6 +21,7 @@
 #include "tmb_region.h" // TMB_REGION_US / TMB_REGION_PAL
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -58,9 +59,10 @@ namespace tmb::native
             Trails, // the effects image's trails (0x1830): sprites along a curve through control points
             TexParticles, // the effects image's textured particles (0x798, MSCNTs at 0x9b8): a TEX0 per sprite
             HeatHaze, // the effects image's heat haze (0xa08): fans textured with the frame itself
+            Lightning, // the effects image's lightning (0x1198): subdivided bolts as strips; its MSCNT runs 0x1830
+            Beams, // the effects image's beams (0xcf8): a strip along a list of points
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
             SkinUnlit, // skinned strips without light (0x878 after setup 0x90, 0x9e8 after 0xb0): colour * VU 5 + VU 20
-            Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
         };
 
         Mode modeForSetup(uint32_t pc)
@@ -83,12 +85,12 @@ namespace tmb::native
         }
 
         // The microprograms this adapter draws, recognised by the lower instruction at each entry (so only while their
-        // code image is loaded). Setups (and programs that stand alone): the hier image's four strip setups, its two
-        // skinned setups (0x50, 0x70: strips at 0x640), sprites, and the effects image's rain. Vertex passes (0x00
-        // rigid, 0x10 morph, 0x20 / 0x30 / 0x40 skinned with three, two, one bones) run after a setup and are drawn
-        // natively exactly when that setup is: a VU1 setup keeps its VU1 vertex pass. VU1 skips what is drawn here
-        // (and the MSCNTs that continue it); the others run on the sandbox, the ribbons among them (0x3270: beams and
-        // trails, each segment widened across it as only VU1's own arithmetic gets right).
+        // code image is loaded). Setups (and programs that stand alone): the hier image's strip setups, skinned setups
+        // (0x50, 0x70: strips at 0x640; 0x90, 0xb0: unlit), sprites, beams and trails (0x3270), chrome and water (0x1db8),
+        // and the effects image's programs (rain, particles, flares, streaks, trails, heat haze, lightning, beams).
+        // Vertex passes (0x00 rigid, 0x10 morph, 0x20 / 0x30 / 0x40 skinned with three, two, one bones) run after a setup
+        // and are drawn natively exactly when that setup is. VU1 skips what is drawn here (and the MSCNTs that continue
+        // it); a program not listed is not run at all (reported once).
         struct Program
         {
             uint32_t pc, lower;
@@ -101,7 +103,8 @@ namespace tmb::native
                                        {0x0000u, 0x4b000000u}, {0x0390u, 0x800206bcu}, {0x2338u, 0x0824002cu},
                                        {0x0118u, 0x10020218u},
                                        {0x0090u, 0x420f036eu}, {0x00b0u, 0x420f036au}, {0x1830u, 0x800206bcu},
-                                       {0x0798u, 0x800206bcu}, {0x0a08u, 0x800206bcu}};
+                                       {0x0798u, 0x800206bcu}, {0x0a08u, 0x800206bcu},
+                                       {0x1198u, 0x01f4012cu}, {0x0cf8u, 0x800206bcu}};
         constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
                                              {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
@@ -120,10 +123,6 @@ namespace tmb::native
 
         // The same decision on the VIF1 thread (the gate) and in the adapter (the stream), each with its own state,
         // over the same MSCALs in the same order.
-        // TMB_NATIVE_TRANSLATE_AB=<seconds>: the programs TMB translates alternate between the translation and the
-        // sandbox (VU1's own arithmetic) every <seconds>, switched at a frame's end and logged: the same scenes drawn
-        // both ways in one run, to find where the translation differs.
-        bool g_translatePhase = true;
 
         bool decide(bool &lastSetupNative, const uint8_t *vu1Code, uint32_t startPc)
         {
@@ -146,93 +145,10 @@ namespace tmb::native
                     lastSetupNative = false;
                     return true;
                 }
-            // TMB_NATIVE_SANDBOX_PCS=<pc>[,<pc>...] (hex): programs the adapter translates, run on the sandbox instead
-            // (VU1's own arithmetic: a reference for the translation).
-            static const std::vector<uint32_t> s_sandboxed = []
-            {
-                std::vector<uint32_t> pcs;
-                if (const char *value = std::getenv("TMB_NATIVE_SANDBOX_PCS"))
-                    for (char *end = nullptr; *value; value = *end ? end + 1 : end)
-                    {
-                        pcs.push_back(static_cast<uint32_t>(std::strtoul(value, &end, 16)));
-                        if (end == value)
-                            break;
-                    }
-                return pcs;
-            }();
-            if (!g_translatePhase)
-            {
-                lastSetupNative = false;
-                return false;
-            }
-            for (uint32_t pc : s_sandboxed)
-                if (pc == startPc)
-                {
-                    lastSetupNative = false;
-                    return false;
-                }
             if (matches(kVertexPasses, vu1Code, startPc))
                 return lastSetupNative;
             lastSetupNative = matches(kSetups, vu1Code, startPc);
             return lastSetupNative;
-        }
-
-        // TMB_NATIVE_SANDBOX=0: the programs the adapter does not translate stay on VU1 (drawn by the GS, under the
-        // native frame with renderers that keep GS memory themselves); by default the adapter's own VU1 runs them and
-        // they are drawn natively too (ps2x::native::Vu1Sandbox).
-        // TMB_NATIVE_SANDBOX_AB=<seconds>: the sandbox on and off every <seconds> of play, switched at a frame's end and
-        // logged ([tmb:native] sandbox on/off at t=...): the same scenes with the effects from the sandbox and from VU1
-        // and the GS, to compare in one run.
-        bool g_sandboxPhase = true;
-
-        void updateSandboxAb()
-        {
-            static const double s_period = []
-            {
-                const char *value = std::getenv("TMB_NATIVE_SANDBOX_AB");
-                return value && *value ? std::atof(value) : 0.0;
-            }();
-            if (s_period <= 0.0)
-                return;
-            static const auto s_start = std::chrono::steady_clock::now();
-            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
-            const bool on = static_cast<long long>(t / s_period) % 2 == 0;
-            if (on != g_sandboxPhase)
-            {
-                g_sandboxPhase = on;
-                std::fprintf(stderr, "[tmb:native] sandbox %s at t=%.2f\n", on ? "on" : "off", t);
-            }
-        }
-
-        bool inMatch();
-
-        void updateTranslateAb()
-        {
-            static const double s_period = []
-            {
-                const char *value = std::getenv("TMB_NATIVE_TRANSLATE_AB");
-                return value && *value ? std::atof(value) : 0.0;
-            }();
-            if (s_period <= 0.0)
-                return;
-            static const auto s_start = std::chrono::steady_clock::now();
-            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
-            const bool on = !inMatch() || static_cast<long long>(t / s_period) % 2 == 0; // in a match only
-            if (on != g_translatePhase)
-            {
-                g_translatePhase = on;
-                std::fprintf(stderr, "[tmb:native] translation %s at t=%.2f\n", on ? "on" : "off (sandbox)", t);
-            }
-        }
-
-        bool sandboxed()
-        {
-            static const bool s_on = []
-            {
-                const char *value = std::getenv("TMB_NATIVE_SANDBOX");
-                return !(value && *value == '0');
-            }();
-            return s_on;
         }
 
         // A match is under way while its frames end (the end of real-time processing, onFrameEnd) less than 100 ms
@@ -247,7 +163,6 @@ namespace tmb::native
 
         // The menus natively too (TMB_NATIVE_MENUS=0: left to VU1 and the GS): they only run the translated strip
         // setups 0xd08 and 0xcc8. Their frames end at sceGsSyncV (onMenuFrameEnd, with native frames).
-        uint32_t g_menuFrames = 0, g_menuPrograms = 0; // logged every 500 menu frames
         bool menusNative()
         {
             static const bool s_on = []
@@ -383,7 +298,8 @@ namespace tmb::native
             // row once, in a transfer before the ones the adapter sees; without them the ribbons' texture coordinates
             // were wrong in the copy, and their segments with them).
             bool sawMask = false, sawRow = false, sawCol = false, sawMode = false;
-            std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
+            // The game's DIRECT packets that only draw (its 2D and particles in a match), drawn natively from their GIF data.
+            std::unique_ptr<ps2x::native::GifToNative> direct;
             // TMB_NATIVE_CHECK=<n>: VU1's own program run beside the translation (checkTranslation), captured, not drawn.
             std::unique_ptr<ps2x::native::Vu1Sandbox> check;
             std::unique_ptr<ps2x::native::Vu1Sandbox> checkEffects; // the effects image's programs: their own VU1 and memory
@@ -392,7 +308,6 @@ namespace tmb::native
             uint32_t checkSetup = 0; // the translated setup the strips belong to
             bool checkResumed = false; // the check is of an MSCNT (else of an MSCAL)
             bool flushed = false;    // flush() ran (the check's way to tell a strip's own triangles)
-            uint32_t sandboxSetup = 0;                         // the last setup the sandbox ran (statistics)
             bool setupOnVu1 = false;                           // TMB_NATIVE_VU1_PCS
             Mode mode = Mode::None;
             float matrix[16] = {};     // object to GS screen: camera (VU 9-12) x object (VU 0-3), columns
@@ -1531,6 +1446,298 @@ namespace tmb::native
             s.sampleTarget = false;
         }
 
+        // The effects image's lightning (0x1198; checked against the 4,029 points of 237 PS2X_VU1_RECORD runs: positions,
+        // colours and texture coordinates exact). Bolt b (VU 300.w of them) runs between VU 8 + 2b and 9 + 2b, from the
+        // farther end (the larger w) to the nearer: subdivided while 0.5 L (at most 65, L the length, VU 301.z) halved
+        // stays at 1.5 or over, each midpoint (a + b) / 2 + (r - 1.5) s (s = VU 301.y L, halved per level; r three of
+        // VU1's random numbers seeded from the start's w, two fresh at each level). Each point is drawn as two vertices
+        // across the bolt on screen: (VU 5.x dy, -VU 5.y dx) VU 301.w / |d| (d the ends on screen, y doubled; an end
+        // behind the camera taken at w = 1), times q; texture S from -VU 301.x L / 2 + start.w - 1.5 by VU 301.x L / 2^n,
+        // T 1 and 0 (0 and 1 when start.w < 1.5); colours between palette rows 264 + i and 265 + i, i from 29 down (28
+        // up when the start is the farther), 1 / 2^n a point; fog VU 4.w + (VU 5.w - L) q, at most VU 7.w. A point
+        // whose corners (or the previous point's) leave the guard band takes ADC: a strip broken there.
+        void lightning(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            if (!useMaterial(s, 300u, 0u, triangles, 0x42412u))
+                return;
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float(&c7)[4] = s.fxConst[3];
+            const float guard = std::fabs(c6[3]);
+            float m[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    m[j * 4 + k] = vu.f(j, k);
+            const auto project = [&](const float p[3], float out[4])
+            {
+                for (int i = 0; i < 4; ++i)
+                    out[i] = m[i] * p[0] + m[4 + i] * p[1] + m[8 + i] * p[2] + m[12 + i];
+            };
+            const float x301 = vu.f(301, 0), y301 = vu.f(301, 1), z301 = vu.f(301, 2), w301 = vu.f(301, 3);
+            const uint32_t bolts = vu.w(300, 3) & 0xffffu;
+            for (uint32_t b = 0; b < bolts; ++b)
+            {
+                float start[4], end[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    start[i] = vu.f(8u + 2u * b, i);
+                    end[i] = vu.f(9u + 2u * b, i);
+                }
+                const float d3[3] = {end[0] - start[0], end[1] - start[1], end[2] - start[2]};
+                const float length = std::sqrt(d3[0] * d3[0] + d3[1] * d3[1] + d3[2] * d3[2]);
+                float sc[4], ec[4];
+                project(start, sc);
+                project(end, ec);
+                const bool startBehind = sc[3] < 1.0f, endBehind = ec[3] < 1.0f;
+                if (startBehind && endBehind)
+                    continue;
+                const bool fromEnd = !(ec[3] - sc[3] < 0.0f); // MSUB.w vf0 at 0x1260: from the farther end
+                float first[4], second[4];
+                std::memcpy(first, fromEnd ? ec : sc, sizeof(first));
+                std::memcpy(second, fromEnd ? sc : ec, sizeof(second));
+                if (startBehind || endBehind)
+                {
+                    const bool firstBehind = fromEnd ? endBehind : startBehind;
+                    float *p = firstBehind ? first : second;
+                    const float *o = firstBehind ? second : first;
+                    const float t = (1.0f - o[3]) / (p[3] - o[3]);
+                    for (int i : {0, 1, 3})
+                        p[i] = o[i] + (p[i] - o[i]) * t;
+                }
+                const float qa = first[3] != 0.0f ? 1.0f / first[3] : 0.0f, qb = second[3] != 0.0f ? 1.0f / second[3] : 0.0f;
+                const float dx = first[0] * qa - second[0] * qb, dy = 2.0f * (first[1] * qa - second[1] * qb);
+                const float span = std::sqrt(dx * dx + dy * dy);
+                if (!(span > 0.0f))
+                    continue;
+                const float perp[2] = {c5[0] * dy / span * w301, -c5[1] * dx / span * w301};
+                std::vector<std::array<float, 3>> points;
+                points.push_back(fromEnd ? std::array<float, 3>{end[0], end[1], end[2]} : std::array<float, 3>{start[0], start[1], start[2]});
+                points.push_back(fromEnd ? std::array<float, 3>{start[0], start[1], start[2]} : std::array<float, 3>{end[0], end[1], end[2]});
+                uint32_t random = vuRandInit(start[3]);
+                float scale = y301 * length, level = std::min(z301 * length, 65.0f);
+                uint32_t levels = 0;
+                while (level >= 1.5f && points.size() < 513u)
+                {
+                    random = vuRandNext(random);
+                    float rx = vuRandFloat(random);
+                    random = vuRandNext(random);
+                    float ry = vuRandFloat(random);
+                    std::vector<std::array<float, 3>> next;
+                    next.reserve(points.size() * 2u);
+                    next.push_back(points[0]);
+                    for (size_t i = 0; i + 1 < points.size(); ++i)
+                    {
+                        random = vuRandNext(random);
+                        const float rz = vuRandFloat(random);
+                        const float r[3] = {rx, ry, rz};
+                        std::array<float, 3> mid;
+                        for (int k = 0; k < 3; ++k)
+                            mid[k] = points[i][k] * 0.5f + (r[k] - 1.5f) * scale + points[i + 1][k] * 0.5f;
+                        next.push_back(mid);
+                        next.push_back(points[i + 1]);
+                        random = vuRandNext(random);
+                        rx = vuRandFloat(random);
+                        random = vuRandNext(random);
+                        ry = vuRandFloat(random);
+                    }
+                    points.swap(next);
+                    scale *= 0.5f;
+                    level *= 0.5f;
+                    ++levels;
+                }
+                const float step = x301 * length / static_cast<float>(1u << levels);
+                float sCoord = -0.5f * x301 * length + (start[3] - 1.5f);
+                float index = fromEnd ? 29.0f : 28.0f;
+                const float indexStep = (fromEnd ? -1.0f : 1.0f) / static_cast<float>(1u << levels);
+                const bool flip = start[3] - 1.5f >= 0.0f;
+                std::vector<ps2x::native::Vertex> strip;
+                std::vector<bool> adc;
+                bool outsideBefore = false;
+                for (const auto &p : points)
+                {
+                    float c[4];
+                    project(p.data(), c);
+                    const float q = 1.0f / c[3];
+                    const float fogA = c4[3] + c5[3] * q - length * q;
+                    const float fog = std::min(fogA, c7[3]);
+                    const int32_t i = static_cast<int32_t>(index);
+                    const float frac = index - static_cast<float>(i);
+                    const uint32_t low = (264u + static_cast<uint32_t>(i)) & 0x3ffu, high = (265u + static_cast<uint32_t>(i)) & 0x3ffu;
+                    uint32_t rgba = 0;
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const float lo = static_cast<float>(static_cast<int32_t>(vu.w(low, k)));
+                        const float hi = static_cast<float>(static_cast<int32_t>(vu.w(high, k)));
+                        const float value = (lo + 8388608.0f) - lo * frac + hi * frac;
+                        rgba |= (static_cast<uint32_t>(static_cast<int32_t>(value - 8388608.0f)) & 0xffu) << (8 * k);
+                    }
+                    ps2x::native::Vertex a, v;
+                    a.x = c[0] * q - perp[0] * q;
+                    a.y = c[1] * q - perp[1] * q;
+                    a.z = c[2] * q - d3[2] * q;
+                    v.x = c[0] * q + perp[0] * q;
+                    v.y = c[1] * q + perp[1] * q;
+                    v.z = c[2] * q + d3[2] * q;
+                    a.u = v.u = sCoord;
+                    a.v = flip ? 1.0f : 0.0f;
+                    v.v = flip ? 0.0f : 1.0f;
+                    a.rgba = v.rgba = rgba;
+                    a.fog = v.fog = std::floor(std::max(fog, 0.0f)) / 255.0f;
+                    const bool outside = std::fabs(a.x + c6[0]) > guard || std::fabs(a.y + c6[1]) > guard || c6[2] + fogA < -guard ||
+                                         std::fabs(v.x + c6[0]) > guard || std::fabs(v.y + c6[1]) > guard || c6[2] + c[3] < -guard;
+                    const bool kick = !(outside || outsideBefore);
+                    outsideBefore = outside;
+                    strip.push_back(a);
+                    strip.push_back(v);
+                    adc.push_back(!kick);
+                    adc.push_back(!kick);
+                    sCoord += step;
+                    index += indexStep;
+                }
+                for (size_t i = 2; i < strip.size(); ++i)
+                {
+                    if (adc[i])
+                        continue;
+                    triangles.push_back(strip[i - 2]);
+                    triangles.push_back(strip[i - 1]);
+                    triangles.push_back(strip[i]);
+                }
+            }
+        }
+
+        // The effects image's beams (0xcf8; not seen in the recorded matches: derived from its code, its strip being drawn by
+        // the lightning's builder at 0xf38, which 0x1198's check covers). n = VU 296.w points, VU 7 + n down to VU 8 (VU 8
+        // up when the first is the nearer, the steps then reversed), drawn as the lightning's strip: across the beam by
+        // (VU 5.x dy, -VU 5.y dx) / |d| (d from the first point to VU 8 on screen, y doubled; an end behind the camera taken
+        // at w = 1) times a width; texture S, palette index and width from VU 298 (x, z, w), stepping by VU 297 a point;
+        // T 1 and 0; fog VU 4.w + VU 5.w q (at most VU 7.w).
+        void beams(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            if (!useMaterial(s, 296u, 0u, triangles, vu.w(296, 2)) || vu.w(296, 2) != 0x42412u)
+                return;
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float(&c7)[4] = s.fxConst[3];
+            const float guard = std::fabs(c6[3]);
+            int32_t count = static_cast<int32_t>(vu.w(296, 3));
+            float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+            if (count < 0)
+            {
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        object[j][k] = vu.f(s.top + 3u + j, k);
+                count &= 0x7fff;
+            }
+            if (count < 2)
+                return;
+            float m[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    m[j * 4 + k] = vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] + vu.f(3, k) * object[j][3];
+            const auto project = [&](uint32_t at, float out[4])
+            {
+                const float p[3] = {vu.f(at & 0x3ffu, 0), vu.f(at & 0x3ffu, 1), vu.f(at & 0x3ffu, 2)};
+                for (int i = 0; i < 4; ++i)
+                    out[i] = m[i] * p[0] + m[4 + i] * p[1] + m[8 + i] * p[2] + m[12 + i];
+            };
+            float first[4], last[4];
+            project(7u + static_cast<uint32_t>(count), first);
+            project(8u, last);
+            const bool firstBehind = first[3] < 1.0f, lastBehind = last[3] < 1.0f;
+            if (firstBehind && lastBehind)
+                return;
+            float a[4], b[4];
+            std::memcpy(a, first, sizeof(a));
+            std::memcpy(b, last, sizeof(b));
+            if (firstBehind || lastBehind)
+            {
+                float *p = firstBehind ? a : b;
+                const float *o = firstBehind ? b : a;
+                const float t = (1.0f - o[3]) / (p[3] - o[3]);
+                for (int i : {0, 1, 3})
+                    p[i] = o[i] + (p[i] - o[i]) * t;
+            }
+            const float qa = 1.0f / a[3], qb = 1.0f / b[3];
+            const float dx = a[0] * qa - b[0] * qb, dy = 2.0f * (a[1] * qa - b[1] * qb);
+            const float span = std::sqrt(dx * dx + dy * dy);
+            if (!(span > 0.0f))
+                return;
+            const float perp[2] = {c5[0] * dy / span, -c5[1] * dx / span};
+            float sCoord = vu.f(298, 0), index = vu.f(298, 2), width = vu.f(298, 3);
+            float sStep = vu.f(297, 0), indexStep = vu.f(297, 2), widthStep = vu.f(297, 3);
+            uint32_t at = 7u + static_cast<uint32_t>(count);
+            int32_t direction = -1;
+            if (first[3] - last[3] < 0.0f) // the first is the nearer: from VU 8 up, the steps from the far end back
+            {
+                at = 8u;
+                direction = 1;
+                sCoord += sStep * static_cast<float>(count - 1);
+                index += indexStep * static_cast<float>(count - 1);
+                width += widthStep * static_cast<float>(count - 1);
+                sStep = -sStep;
+                indexStep = -indexStep;
+                widthStep = -widthStep;
+            }
+            std::vector<ps2x::native::Vertex> strip;
+            std::vector<bool> adc;
+            bool outsideBefore = false;
+            for (int32_t k = 0; k < count; ++k, at = static_cast<uint32_t>(static_cast<int32_t>(at) + direction))
+            {
+                float c[4];
+                project(at, c);
+                const float q = 1.0f / c[3];
+                const float fogA = c4[3] + c5[3] * q;
+                const float fog = std::min(fogA, c7[3]);
+                const int32_t i = static_cast<int32_t>(index);
+                const float frac = index - static_cast<float>(i);
+                const uint32_t low = (264u + static_cast<uint32_t>(i)) & 0x3ffu, high = (265u + static_cast<uint32_t>(i)) & 0x3ffu;
+                uint32_t rgba = 0;
+                for (int n = 0; n < 4; ++n)
+                {
+                    const float lo = static_cast<float>(static_cast<int32_t>(vu.w(low, n)));
+                    const float hi = static_cast<float>(static_cast<int32_t>(vu.w(high, n)));
+                    const float value = (lo + 8388608.0f) - lo * frac + hi * frac;
+                    rgba |= (static_cast<uint32_t>(static_cast<int32_t>(value - 8388608.0f)) & 0xffu) << (8 * n);
+                }
+                ps2x::native::Vertex va, vb;
+                va.x = c[0] * q - perp[0] * width * q;
+                va.y = c[1] * q - perp[1] * width * q;
+                vb.x = c[0] * q + perp[0] * width * q;
+                vb.y = c[1] * q + perp[1] * width * q;
+                va.z = vb.z = c[2] * q;
+                va.u = vb.u = sCoord;
+                va.v = 1.0f;
+                vb.v = 0.0f;
+                va.rgba = vb.rgba = rgba;
+                va.fog = vb.fog = std::floor(std::max(fog, 0.0f)) / 255.0f;
+                const bool outside = std::fabs(va.x + c6[0]) > guard || std::fabs(va.y + c6[1]) > guard || c6[2] + fogA < -guard ||
+                                     std::fabs(vb.x + c6[0]) > guard || std::fabs(vb.y + c6[1]) > guard || c6[2] + c[3] < -guard;
+                const bool kick = !(outside || outsideBefore);
+                outsideBefore = outside;
+                strip.push_back(va);
+                strip.push_back(vb);
+                adc.push_back(!kick);
+                adc.push_back(!kick);
+                sCoord += sStep;
+                index += indexStep;
+                width += widthStep;
+            }
+            for (size_t i = 2; i < strip.size(); ++i)
+            {
+                if (adc[i])
+                    continue;
+                triangles.push_back(strip[i - 2]);
+                triangles.push_back(strip[i - 1]);
+                triangles.push_back(strip[i]);
+            }
+        }
+
         void particles(State &s, std::vector<ps2x::native::Vertex> &triangles, bool first)
         {
             ++g_stats.strips;
@@ -1634,6 +1841,12 @@ namespace tmb::native
             if (s.mode == Mode::TexParticles)
             {
                 texParticles(s, triangles, false);
+                return;
+            }
+            if (s.mode == Mode::Lightning) // 0x1198 ends at 0x1830: its MSCNT is a trail's MSCAL
+            {
+                s.mode = Mode::Trails;
+                trails(s, triangles);
                 return;
             }
             if (s.mode == Mode::Trails)
@@ -1757,7 +1970,8 @@ namespace tmb::native
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
             ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon || s.mode == Mode::Particles ||
                                                                 s.mode == Mode::LensFlares || s.mode == Mode::Streaks || s.mode == Mode::Trails ||
-                                                                s.mode == Mode::TexParticles || s.mode == Mode::HeatHaze
+                                                                s.mode == Mode::TexParticles || s.mode == Mode::HeatHaze ||
+                                                                s.mode == Mode::Lightning || s.mode == Mode::Beams
                                                             ? kScreenSpace
                                                             : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
@@ -1959,7 +2173,7 @@ namespace tmb::native
         bool effectsMode(Mode mode)
         {
             return mode == Mode::Particles || mode == Mode::LensFlares || mode == Mode::Streaks || mode == Mode::Trails ||
-                   mode == Mode::TexParticles || mode == Mode::HeatHaze;
+                   mode == Mode::TexParticles || mode == Mode::HeatHaze || mode == Mode::Lightning || mode == Mode::Beams;
         }
 
         void checkTranslation(State &s, const ps2x::native::Vertex *mine, size_t mineCount)
@@ -1978,7 +2192,7 @@ namespace tmb::native
             {
                 if (s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon || s.mode == Mode::Particles ||
                     s.mode == Mode::LensFlares || s.mode == Mode::Streaks || s.mode == Mode::Trails || s.mode == Mode::TexParticles ||
-                    s.mode == Mode::HeatHaze)
+                    s.mode == Mode::HeatHaze || s.mode == Mode::Lightning || s.mode == Mode::Beams)
                 {
                     out[0] = v.x, out[1] = v.y, out[2] = v.z;
                     return;
@@ -2075,7 +2289,7 @@ namespace tmb::native
                 const uint32_t cmd = (code >> 24) & 0x7fu, num = (code >> 16) & 0xffu, imm = code & 0xffffu;
                 if ((cmd & 0x60u) == 0x60u)
                 {
-                    // As VIF1 unpacks it (masks, row / column, add modes): the sandbox runs programs on this memory.
+                    // As VIF1 unpacks it (masks, row / column, add modes): the translations read this memory.
                     s.vif.cycle = s.cl | (s.wl << 8);
                     s.vif.tops = s.tops;
                     const uint32_t used = ps2x::native::vifUnpack(s.vif, reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), code,
@@ -2129,9 +2343,7 @@ namespace tmb::native
                             }
                         }
                     }
-                    if (cmd == 0x17 && s.mode == Mode::Sandbox)
-                        s.sandbox->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
-                    else if (cmd == 0x17 && s.check && s.checkSetup != 0u && s.mode != Mode::None)
+                    if (cmd == 0x17 && s.check && s.checkSetup != 0u && s.mode != Mode::None)
                     {
                         // Every triangle the strip makes, the batches it flushes on the way (a TEX0 per sprite) too.
                         s.checkMine.clear();
@@ -2155,7 +2367,7 @@ namespace tmb::native
                     {
                         const uint32_t pc = imm * 8u;
                         // TMB_NATIVE_VU1_PCS=<pc>[,<pc>...] (hex): setups left on the real VU1 (with their vertex passes and
-                        // MSCNTs), the reference for the sandbox and the translations.
+                        // MSCNTs): a PS2X_VU1_RECORD reference for a translation (a diagnostic).
                         static const std::vector<uint32_t> s_onVu1 = []
                         {
                             std::vector<uint32_t> pcs;
@@ -2178,31 +2390,26 @@ namespace tmb::native
                             s.lastSetupNative = false;
                         else
                             native = decide(s.lastSetupNative, s.code, pc) && (inMatch() || menusNative());
-                        const bool menus = menusNative();
-                        const bool sandbox = !native && s.sandbox && g_sandboxPhase && (inMatch() || menus) && !s.setupOnVu1;
-                        noteDecision(pc, native || sandbox);
+                        // A program the adapter does not translate is not run at all (no VU1, no interpreter of its
+                        // microcode): VU1 skips it and nothing draws it, said once per program so that it shows. Only
+                        // TMB_NATIVE_VU1_PCS (a diagnostic) leaves a setup to VU1.
+                        const bool active = (inMatch() || menusNative()) && !s.setupOnVu1;
+                        noteDecision(pc, native || active);
                         if (!native)
                         {
-                            if (sandbox)
+                            flush(s, triangles);
+                            s.mode = Mode::None; // its MSCNTs are skipped too
+                            if (active)
                             {
-                                // Another program (or a vertex pass after one): run here, drawn natively as the
-                                // next group (VU1 skips it: drawnNatively).
-                                flush(s, triangles);
-                                ps2x::native::Renderer::instance().beginGroup(++s.group);
-                                ps2x::native::Renderer::instance().setKey(0);
-                                s.mode = Mode::Sandbox;
-                                if (!matches(kVertexPasses, s.code, pc))
-                                    s.sandboxSetup = pc;
-                                s.sandbox->gif().setSource((s.sandboxSetup << 16) | pc); // its setup and itself
-                                s.sandbox->gif().setGsWrites(false); // drawn by the native renderer, never the GS's state
-                                g_menuPrograms += menus ? 1u : 0u;
-                                s.sandbox->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
-                                                s.top, s.itops);
-                            }
-                            else
-                            {
-                                flush(s, triangles);
-                                s.mode = Mode::None; // on VU1 (a menu's, or with TMB_NATIVE_SANDBOX=0): its MSCNTs too
+                                static std::unordered_map<uint64_t, bool> s_reported;
+                                uint32_t lower = 0;
+                                if (pc + 8u <= sizeof(s.code))
+                                    std::memcpy(&lower, s.code + pc, 4);
+                                if (!s_reported[(static_cast<uint64_t>(pc) << 32) | lower])
+                                {
+                                    s_reported[(static_cast<uint64_t>(pc) << 32) | lower] = true;
+                                    std::fprintf(stderr, "[tmb:native] VU1 program %#x (first word %08x) not translated: not drawn\n", pc, lower);
+                                }
                             }
                             if (!matches(kVertexPasses, s.code, pc))
                             {
@@ -2250,6 +2457,26 @@ namespace tmb::native
                                     for (int k = 0; k < 4; ++k)
                                         s.fxConst[j][k] = s.vu.f(4 + j, k);
                                 s.mode = Mode::None;
+                            }
+                            else if (pc == 0x0cf8u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Beams;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                beams(s, triangles);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x1198u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Lightning;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                lightning(s, triangles);
+                                s.collecting = false;
                             }
                             else if (pc == 0x0a08u)
                             {
@@ -2333,7 +2560,8 @@ namespace tmb::native
                                 s.checkResumed = false;
                                 if ((s.mode == Mode::Particles && pc == 0x0390u) || (s.mode == Mode::LensFlares && pc == 0x2338u) ||
                                     (s.mode == Mode::Streaks && pc == 0x0118u) || (s.mode == Mode::Trails && pc == 0x1830u) ||
-                                    (s.mode == Mode::TexParticles && pc == 0x0798u) || (s.mode == Mode::HeatHaze && pc == 0x0a08u))
+                                    (s.mode == Mode::TexParticles && pc == 0x0798u) || (s.mode == Mode::HeatHaze && pc == 0x0a08u) ||
+                                    (s.mode == Mode::Lightning && pc == 0x1198u) || (s.mode == Mode::Beams && pc == 0x0cf8u))
                                 {
                                     s.checkMine.insert(s.checkMine.end(), triangles.begin() + static_cast<std::ptrdiff_t>(std::min(s.particleFrom, triangles.size())),
                                                        triangles.end());
@@ -2363,8 +2591,6 @@ namespace tmb::native
                     const size_t at = static_cast<size_t>(imm) * 8u, bytes = std::min(size, count - i) * 4u;
                     if (at < sizeof(s.code))
                         std::memcpy(s.code + at, words + i, std::min(bytes, sizeof(s.code) - at));
-                    if (s.sandbox)
-                        s.sandbox->codeChanged();
                     i += size;
                     break;
                 }
@@ -2373,7 +2599,7 @@ namespace tmb::native
                     const size_t size = static_cast<size_t>(imm ? imm : 65536u) * 4u;
                     const size_t have = std::min(size, count - i);
                     readDirect(s, words + i, have / 4u);
-                    const bool native = s.sandbox && g_sandboxPhase && inMatch() && have == size && drawsOnly(words + i, have / 4u);
+                    const bool native = s.direct && inMatch() && have == size && drawsOnly(words + i, have / 4u);
                     // TMB_NATIVE_LOG_DIRECT=1: the A+D addresses of some DIRECT packets in a match.
                     static const bool s_logDirect = std::getenv("TMB_NATIVE_LOG_DIRECT") != nullptr;
                     static uint32_t s_directLogged = 0;
@@ -2395,12 +2621,12 @@ namespace tmb::native
                         flush(s, triangles);
                         ps2x::native::Renderer::instance().beginGroup(++s.group);
                         ps2x::native::Renderer::instance().setKey(0);
-                        s.sandbox->gif().setSource(0xd1ec7u);
-                        s.sandbox->gif().packet(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
-                        s.sandbox->gif().flush();
+                        s.direct->setSource(0xd1ec7u);
+                        s.direct->packet(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
+                        s.direct->flush();
                     }
-                    else if (s.sandbox)
-                        s.sandbox->gif().registers(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
+                    else if (s.direct)
+                        s.direct->registers(reinterpret_cast<const uint8_t *>(words + i), have * 4u);
                     i += size;
                     break;
                 }
@@ -2424,7 +2650,7 @@ namespace tmb::native
 #endif
             // The microprograms write Z as FTOI4 of z / w, but into XYZF2 (the strips, the sprites: they carry fog),
             // whose 24-bit Z is that word over 16: GS Z is z / w itself. With 16, the adapter's scenery sat 16 times
-            // nearer than the effects VU1 and the sandbox draw over it, and hid most of them.
+            // nearer than the effects drawn over it, and hid most of them.
             screen.gsZScale = 1.0f;
             return screen;
         }
@@ -2483,8 +2709,7 @@ namespace tmb::native
         // TMB_NATIVE_VU1=1 keeps VU1 running them too (to compare with the GS frame).
         if (const char *keep = std::getenv("TMB_NATIVE_VU1"); !(keep && *keep == '1'))
         {
-            if (sandboxed())
-                state().sandbox = std::make_unique<ps2x::native::Vu1Sandbox>();
+            state().direct = std::make_unique<ps2x::native::GifToNative>();
             if (checkLimit() > 0)
             {
                 State &st = state();
@@ -2571,7 +2796,7 @@ namespace tmb::native
                              first[0], first[1], first[2], first[3], s_on ? " (then replaced)" : "");
             }
         }
-        if (!s_on || !enabled() || !inMatch() || !state().sandbox)
+        if (!s_on || !enabled() || !inMatch())
             return;
         ps2x::native::Renderer &renderer = ps2x::native::Renderer::instance();
         renderer.wantDepth();
@@ -2630,23 +2855,16 @@ namespace tmb::native
         if (!enabled())
             return;
         g_lastMatchFrame = hostSeconds();
-        updateSandboxAb();
-        updateTranslateAb();
         publish();
     }
 
-    // A native frame end (timer 1 or sceGsSyncV) outside a match: the end of a menu frame; publishes what the sandbox
-    // drew of it (empty with TMB_NATIVE_MENUS=0, so the last match frame does not stay over a menu).
+    // A native frame end (timer 1 or sceGsSyncV) outside a match: the end of a menu frame; publishes what was drawn
+    // of it (empty with TMB_NATIVE_MENUS=0, so the last match frame does not stay over a menu).
     void onMenuFrameEnd()
     {
         if (!enabled() || inMatch())
             return;
         g_lastMenuFrame = hostSeconds();
-        if (++g_menuFrames % 500u == 0u)
-        {
-            std::fprintf(stderr, "[tmb:native] menus: 500 frames, %u programs on the sandbox\n", g_menuPrograms);
-            g_menuPrograms = 0;
-        }
         publish();
     }
 }

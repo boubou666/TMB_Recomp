@@ -997,3 +997,19 @@ Both executables carry their full symbol tables, so everything hand-written is s
 - First runs: USA boots, plays the movies, menus (its MOVIES entry), story intro and a match at 57.4 fps (median
   59.2) on the PS2 path, 54.1 (median 56.3) native; the European build is unchanged.
 - The USA disc's character story cinematics (MOV/X*.PSS) are 70-136 MB each, the European disc's 5-12 MB.
+
+## 2026-10-31: every VU1 program native, the sandbox removed
+
+The VU1 sandbox (the adapter's own VU1 interpreter for the programs it did not translate) is gone, with
+`TMB_NATIVE_SANDBOX`, `TMB_NATIVE_SANDBOX_PCS`, `TMB_NATIVE_SANDBOX_AB` and `TMB_NATIVE_TRANSLATE_AB`. Each program the
+game runs has a native function in `runtime/tmb_native.cpp`: the menus use the strip setups already translated; the
+hier image's 0x3270 (beams and trails), 0x1db8 (chrome, glass, water), 0x90 / 0xb0 (unlit skinned strips); the effects
+image's 0x390 / 0x798 (particles, with a TEX0 per sprite for 0x798), 0x2338 (lens flares), 0x118 (streaks), 0x1830
+(trails, VU1's random numbers reproduced), 0xa08 (heat haze: fans textured with the frame, `Material::sampleTarget`),
+0x1198 (lightning: subdivision with VU1's random numbers) and 0xcf8 (beams; not seen in play, derived from its code).
+Each was derived from `PS2X_VU1_RECORD` runs, an offline model matched to VU1's kicked packets (and `PS2X_VU1_TRACE`
+with `ps2_vu1_replay` for the instruction-level values), then checked in play against VU1 (`TMB_NATIVE_CHECK`).
+A program not translated is not run (no VU1, no interpreter): VU1 skips it and the adapter reports it once. The game's
+DIRECT packets that only draw (in a match) are drawn natively from their GIF data by a `GifToNative` of their own.
+Still emulated: the GS front end for the menus, HUD and 2D.
+

@@ -37,7 +37,7 @@ Windows, Ryzen 7 7800X3D, RTX 5070 Ti; scripted play through the menus into the 
   sound, HUD, split screen), deaths, respawns, game over, saving and loading. Story mode: level 1 of 8 checked.
 - **The native path** (`TMB_NATIVE=1`, `scripts/run_native.sh`), every layer of the PS2 replaced:
   - frames on the PC's clock (`timer1HandlerNative`, the fork's `FramePacer`; `TMB_NATIVE_FRAMES=0` for the vblanks);
-  - the 3D from the game's own data (`runtime/tmb_native.cpp`), the other VU1 programs in the VU1 sandbox;
+  - the 3D and every VU1 effect from the game's own data (`runtime/tmb_native.cpp`), no VU1 interpreter;
   - the rest of the GS stream (menus, HUD, fonts, movies) translated into OpenGL by the fork's GS native back end,
     the 3D drawn into the same targets at its markers; presentation on the GPU; internal resolution 2x
     (`PS2X_GS_SCALE`); no paraLLEl-GS;
