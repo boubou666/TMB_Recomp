@@ -54,6 +54,11 @@ namespace tmb::native
     bool enabled();
 }
 
+namespace tmb::vu0
+{
+    void install();
+}
+
 namespace
 {
     constexpr uint32_t kTmbPalEntry = TMB_ADDR(0x00100008u);
@@ -1688,6 +1693,7 @@ namespace
         runtime.registerFunction(kVblankHandler, &vblankHandlerOverride);
         runtime.registerFunction(kHier, &hierOverride);
         tmb::native::install(); // TMB_NATIVE
+        tmb::vu0::install();    // the VU0 microprograms in C++ (TMB_VU0_NATIVE=0: the interpreter)
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);

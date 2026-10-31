@@ -436,8 +436,9 @@ namespace tmb::native
             // The rigid strip programs scale z / w by VU 4.z, the object's depth factor (MULz.z vf24, vf19z at 0x1018,
             // 0x1188, 0x1460, 0x16c8), as the sprites do (sprite() applies it itself): without it the scenery sat at
             // another depth than the glows and smoke drawn over it, and cut them. The skinned strips do not scale.
+            // The unlit skinned loops (0x878, 0x9e8) scale it too (MULz.z vf24, vf24, vf6z at 0x948, 0xa90); the lit one does not.
             if (s.mode == Mode::Unlit || s.mode == Mode::Scaled || s.mode == Mode::Directional || s.mode == Mode::Point ||
-                s.mode == Mode::Reflective)
+                s.mode == Mode::Reflective || s.mode == Mode::SkinUnlit)
                 for (int j = 0; j < 4; ++j)
                     s.matrix[j * 4 + 2] *= s.vu.f(4, 2);
             s.haveTexture = false;
