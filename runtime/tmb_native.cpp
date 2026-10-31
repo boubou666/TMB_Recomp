@@ -15,6 +15,7 @@
 
 #include "ps2_runtime.h"
 #include "runtime/native/native_renderer.h"
+#include "runtime/native/native_texture_cache.h"
 #include "runtime/native/native_vif1.h"
 #include "runtime/native/native_vu1_sandbox.h"
 #include "runtime/ps2_memory.h"
@@ -36,6 +37,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace tmb::textures
+{
+    void refresh(const uint8_t *rdram);
+    std::shared_ptr<const ps2x::native::TextureCache::Texture> lookup(uint64_t tex0, uint64_t texa);
+}
 
 namespace tmb::native
 {
@@ -1969,13 +1976,20 @@ namespace tmb::native
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            // The texture from the game's own data (runtime/tmb_textures.cpp), never GS memory; none found: untextured.
+            std::shared_ptr<const ps2x::native::TextureCache::Texture> texture;
+            if (material.textured)
+            {
+                texture = tmb::textures::lookup(material.tex0, 0u);
+                material.textured = texture != nullptr;
+            }
             ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon || s.mode == Mode::Particles ||
                                                                 s.mode == Mode::LensFlares || s.mode == Mode::Streaks || s.mode == Mode::Trails ||
                                                                 s.mode == Mode::TexParticles || s.mode == Mode::HeatHaze ||
                                                                 s.mode == Mode::Lightning || s.mode == Mode::Beams
                                                             ? kScreenSpace
                                                             : s.matrix, triangles.data(),
-                                                    static_cast<uint32_t>(triangles.size()));
+                                                    static_cast<uint32_t>(triangles.size()), std::move(texture));
             triangles.clear();
         }
 
@@ -2683,6 +2697,7 @@ namespace tmb::native
         void onVif1(const uint8_t *stream, size_t bytes)
         {
             State &s = state();
+            tmb::textures::refresh(g_rdram); // where the game's textures are in VRAM as it built this chain
             if (const VIFRegisters *regs = ps2x::native::vif1Registers())
             {
                 if (!s.sawMask)

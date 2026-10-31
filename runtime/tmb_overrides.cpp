@@ -59,6 +59,11 @@ namespace tmb::vu0
     void install();
 }
 
+namespace tmb::textures
+{
+    void install(PS2Runtime &runtime);
+}
+
 namespace
 {
     constexpr uint32_t kTmbPalEntry = TMB_ADDR(0x00100008u);
@@ -1694,6 +1699,7 @@ namespace
         runtime.registerFunction(kHier, &hierOverride);
         tmb::native::install(); // TMB_NATIVE
         tmb::vu0::install();    // the VU0 microprograms in C++ (TMB_VU0_NATIVE=0: the interpreter)
+        tmb::textures::install(runtime); // the textures from the game's own data for the native renderer
         if (const char *trace = std::getenv("TMB_TRACE_HIER"); trace && *trace == '1')
         {
             runtime.registerFunction(kHierDmaHandler, &hierDmaHandlerTrace);

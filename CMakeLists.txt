@@ -31,6 +31,8 @@ list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\\.cpp$"
 set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
 
 file(GLOB TMB_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
+# The native texture pack scripts/recomp.sh converts from the disc (runtime/tmb_textures.cpp loads it).
+target_compile_definitions(ps2EntryRunner PRIVATE TMB_TEXTURE_PACK="${TMB_GENERATED_DIR}/tmb_textures.pack")
 
 # IOP modules recompiled to native C++ by the fork's tools/iop_recomp.py (989snd, libsd; PS2X_IOP_NATIVE=1 runs them;
 # scripts/iop_recomp.sh writes them, derived from the game's IRX files like the rest of generated/): their own object
