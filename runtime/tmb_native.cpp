@@ -52,7 +52,14 @@ namespace tmb::native
             Rain,   // the effects image's rain lines (0x1d40)
             Ribbon, // beams and trails (0x3270): two screen-space vertices per point, a triangle strip
             Reflective, // chrome, glass and water strips (0x1db8): environment-mapped, alpha by the view angle
+            Particles, // the effects image's sprites (0x390, its MSCNTs at 0x588 / 0x748): one screen-space quad each
+            LensFlares, // the effects image's lens flares (0x2338): screen-space sprites from the lights' visibility
+            Streaks, // the effects image's streaks (0x118): fading lines; an MSCNT after it runs 0x390's code
+            Trails, // the effects image's trails (0x1830): sprites along a curve through control points
+            TexParticles, // the effects image's textured particles (0x798, MSCNTs at 0x9b8): a TEX0 per sprite
+            HeatHaze, // the effects image's heat haze (0xa08): fans textured with the frame itself
             SkinDirectional, // skinned strips (0x640, after setup 0x50 / 0x70): directional light on the pool's normals
+            SkinUnlit, // skinned strips without light (0x878 after setup 0x90, 0x9e8 after 0xb0): colour * VU 5 + VU 20
             Sandbox, // another program, run by the adapter's own VU1 (Vu1Sandbox): its MSCNTs continue it there
         };
 
@@ -69,6 +76,8 @@ namespace tmb::native
             case 0x1db8: return Mode::Reflective;
             case 0x0050:
             case 0x0070: return Mode::SkinDirectional;
+            case 0x0090:
+            case 0x00b0: return Mode::SkinUnlit;
             default: return Mode::None; // other programs (0x20d0, 0x1db8): not native yet
             }
         }
@@ -87,7 +96,12 @@ namespace tmb::native
         constexpr Program kSetups[] = {{0x0cc8u, 0x420f01e7u}, {0x0ce8u, 0x420f01e3u}, {0x0d08u, 0x420f01dfu},
                                        {0x1700u, 0x420f00a0u}, {0x0050u, 0x420f0376u}, {0x0070u, 0x420f0372u},
                                        {0x3000u, 0x420f0580u}, {0x1d40u, 0x420f07deu}, {0x3270u, 0x420f0532u},
-                                       {0x1db8u, 0x420f07c9u}};
+                                       {0x1db8u, 0x420f07c9u},
+                                       // The effects image: its constants (0x0, LOI) and its particle sprites (0x390).
+                                       {0x0000u, 0x4b000000u}, {0x0390u, 0x800206bcu}, {0x2338u, 0x0824002cu},
+                                       {0x0118u, 0x10020218u},
+                                       {0x0090u, 0x420f036eu}, {0x00b0u, 0x420f036au}, {0x1830u, 0x800206bcu},
+                                       {0x0798u, 0x800206bcu}, {0x0a08u, 0x800206bcu}};
         constexpr Program kVertexPasses[] = {{0x0000u, 0x400001d4u}, {0x0010u, 0x400001aeu}, {0x0020u, 0x40000015u},
                                              {0x0030u, 0x40000058u}, {0x0040u, 0x40000091u}};
 
@@ -372,9 +386,11 @@ namespace tmb::native
             std::unique_ptr<ps2x::native::Vu1Sandbox> sandbox; // with TMB_NATIVE_SANDBOX (the default)
             // TMB_NATIVE_CHECK=<n>: VU1's own program run beside the translation (checkTranslation), captured, not drawn.
             std::unique_ptr<ps2x::native::Vu1Sandbox> check;
+            std::unique_ptr<ps2x::native::Vu1Sandbox> checkEffects; // the effects image's programs: their own VU1 and memory
             std::vector<ps2x::native::Vertex> checkVertices;
             std::vector<ps2x::native::Material> checkMaterials;
             uint32_t checkSetup = 0; // the translated setup the strips belong to
+            bool checkResumed = false; // the check is of an MSCNT (else of an MSCAL)
             bool flushed = false;    // flush() ran (the check's way to tell a strip's own triangles)
             uint32_t sandboxSetup = 0;                         // the last setup the sandbox ran (statistics)
             bool setupOnVu1 = false;                           // TMB_NATIVE_VU1_PCS
@@ -400,9 +416,19 @@ namespace tmb::native
             bool fogged = false;           // the strip's PRIM.FGE
             uint32_t fogColour = 0;        // FOGCOL as the stream's DIRECT packets set it (before the game's own is known)
             uint32_t prim = 0;             // PRIM as the stream's DIRECT and header A+D set it (a tag without PRE draws with it)
+            uint64_t lastTex0 = 0;         // the last TEX0_1 the GS got (DIRECT or A+D): a packet without one draws with it
             float reflect[3] = {};         // 0x1db8's alpha terms (its setup's TOP .yzw: base, slope, floor)
             bool water = false;            // 0x1db8 with all three 0: the water variant (0x2208)
             bool reflectParams = false;    // 0x1db8's next MSCNT is its parameter step (0xf50 -> 0x1de0), not a strip
+            float fxConst[4][4] = {};      // the effects image's VU 4-7 as its 0x0 loads them (vf29, vf27, vf28, vf31)
+            float fxMatrix[16] = {};       // 0x390's screen matrix (L_0038): VU 0-3, times the batch's own when TOP.w < 0
+            uint32_t fxNext = 0;           // the next particle's position (read downwards, across the MSCNTs)
+            bool fxFade = false;           // 0x390's second variant (TOP.z & 0x8000): fog as alpha, no size clamp
+            float fxBias = 0.0f;           // 0x798's depth term ((TOP + 4).x)
+            bool sampleTarget = false;     // the batch samples the frame drawn into (the heat haze)
+            size_t particleFrom = 0;       // TMB_NATIVE_CHECK: where an 0x390 MSCAL's own triangles start
+            bool collecting = false;       // TMB_NATIVE_CHECK: an effect's MSCAL is drawing; flush() keeps its triangles
+            std::vector<ps2x::native::Vertex> checkMine;
             uint64_t preTags = 0, primTags = 0; // TMB_NATIVE_LOG_PRE: tags with PRE, without
             uint32_t batchFogColour = 0;
             bool depthMasked = false;      // ZBUF_1.ZMSK as the stream's DIRECT packets (or a strip's material) set it
@@ -602,25 +628,32 @@ namespace tmb::native
             std::fprintf(stderr, "[tmb:native] %s A+D %#x = %#llx\n", where, address, static_cast<unsigned long long>(value));
         }
 
-        bool useMaterial(State &s, uint32_t tagQw, uint32_t header, std::vector<ps2x::native::Vertex> &triangles)
+        // regs: the tag's registers (the strips' ST, RGBAQ, XYZF2 by default); adAt / adCount: an A+D block of the
+        // packet's own (the particles' TEX0) instead of a header at 149.
+        bool useMaterial(State &s, uint32_t tagQw, uint32_t header, std::vector<ps2x::native::Vertex> &triangles,
+                         uint32_t regs = 0x412u, uint32_t adAt = 0u, uint32_t adCount = 0u)
         {
             const uint32_t tag1 = s.vu.w(tagQw, 1), tag2 = s.vu.w(tagQw, 2);
-            if (tag2 != 0x412u)
+            if (tag2 != regs)
                 return false;
             uint64_t tex0 = s.tex0;
             bool textured = s.haveTexture;
-            if (header != 0u)
-                for (uint32_t q = 0; q < 3u; ++q)
+            const uint32_t first = adCount != 0u ? adAt : 149u + header, count = adCount != 0u ? adCount : header != 0u ? 3u : 0u;
+            for (uint32_t q = 0; q < count; ++q)
                 {
-                    const uint32_t qw = 149u + header + q;
+                    const uint32_t qw = first + q;
                     logRegister("material", s.vu.w(qw, 2) & 0xffu, static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32));
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x00u) // PRIM
                         s.prim = s.vu.w(qw, 0) & 0x7ffu;
+                    if ((s.vu.w(qw, 2) & 0xffu) == 0x42u) // ALPHA_1 (the flares' packet sets its own)
+                        s.alpha = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
+                    if ((s.vu.w(qw, 2) & 0xffu) == 0x47u) // TEST_1
+                        s.test = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x4eu) // ZBUF_1
                         s.depthMasked = (s.vu.w(qw, 1) & 1u) != 0u;
                     if ((s.vu.w(qw, 2) & 0xffu) == 0x06u) // TEX0_1
                     {
-                        tex0 = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
+                        tex0 = s.lastTex0 = static_cast<uint64_t>(s.vu.w(qw, 0)) | (static_cast<uint64_t>(s.vu.w(qw, 1)) << 32);
                         textured = true;
                     }
                 }
@@ -628,6 +661,12 @@ namespace tmb::native
             const bool pre = ((tag1 >> 14) & 1u) != 0u;
             const uint32_t attributes = pre ? (tag1 >> 15) & 0x7ffu : s.prim;
             const bool blended = (attributes & 0x40u) != 0u, fogged = (attributes & 0x20u) != 0u;
+            if (regs != 0x412u) // an effects packet: textured by PRIM.TME, with its own TEX0 or the GS's last
+            {
+                if (count == 0u)
+                    tex0 = s.lastTex0;
+                textured = (attributes & 0x10u) != 0u;
+            }
             ++(pre ? s.preTags : s.primTags);
             static const bool s_logPre = std::getenv("TMB_NATIVE_LOG_PRE") != nullptr;
             if (s_logPre && (s.preTags + s.primTags) % 20000u == 0u)
@@ -698,8 +737,9 @@ namespace tmb::native
         // the strip's tag at TOP + 4, else the strip's tag at TOP; vertex k at TOP + 17 + 3k: the pool offset (w), the
         // colour, the texture coordinates (4.12, plus VU 4). Directional light on the pool's blended normal:
         // colour * (VU 17-19 . max(0, VU 6-8 . n)) * VU 5 + VU 20. All 4005 checked vertices of the recorded match
-        // (colour, screen position, texture coordinates) match VU1.
-        void skinnedStrip(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        // (colour, screen position, texture coordinates) match VU1. Unlit (0x878, 0x9e8: setups 0x90, 0xb0): the same
+        // layout, the colour * VU 5 + VU 20 (at most 255).
+        void skinnedStrip(State &s, std::vector<ps2x::native::Vertex> &triangles, bool lit = true)
         {
             ++g_stats.strips;
             const VuImage &vu = s.vu;
@@ -730,7 +770,8 @@ namespace tmb::native
                 for (int i = 0; i < 3; ++i)
                     d[i] = std::max(0.0f, vu.f(6, i) * n[0] + vu.f(7, i) * n[1] + vu.f(8, i) * n[2]);
                 for (int k2 = 0; k2 < 3; ++k2)
-                    c[k2] = static_cast<float>(vu.w(q + 1, k2)) * (vu.f(17, k2) * d[0] + vu.f(18, k2) * d[1] + vu.f(19, k2) * d[2]) * vu.f(5, k2) +
+                    c[k2] = static_cast<float>(vu.w(q + 1, k2)) * (lit ? vu.f(17, k2) * d[0] + vu.f(18, k2) * d[1] + vu.f(19, k2) * d[2] : 1.0f) *
+                                vu.f(5, k2) +
                             vu.f(20, k2);
                 c[3] = static_cast<float>(vu.w(q + 1, 3)) * vu.f(5, 3) + vu.f(20, 3);
                 out.rgba = clampByte(c[0]) | (clampByte(c[1]) << 8) | (clampByte(c[2]) << 16) | (clampByte(c[3]) << 24);
@@ -931,10 +972,683 @@ namespace tmb::native
             }
         }
 
+        // The effects image's particles (0x390; checked against 51,643 particles of PS2X_VU1_RECORD runs: counts,
+        // culling, colours, UVs and fog exact, corners within VU rounding). Its 0x0 left VU 4-7 in vf29, vf27, vf28,
+        // vf31. The MSCAL: an A+D block (TEX0) at TOP, the sprite tag at TOP + 2 (its x the count), the positions read
+        // downwards from (TOP.w & 0x7fff) + 7 through VU 0-3 (times the batch's matrix at TOP + 5, + 10, + 15, + 20 when
+        // TOP.w is negative); particle k's colour at TOP + 3 + 5k and its UV row's index at TOP + 4 + 5k (VU 296 + i:
+        // U1 V1 U2 V2, in texels x 16). Its MSCNTs (0x588, 0x748): the tag at TOP, colours from TOP + 1, the positions
+        // where the last batch stopped. Each particle: c = M p, q = 1 / c.w, half size VU 5.xyz p.w q (x, y at most
+        // VU 5.xy / 2), corners c q -+ half; dropped when a corner leaves VU 6.w's guard band (offset by VU 6.xy) or
+        // VU 6.z + c.w < -VU 6.w (behind the camera). Colour + VU 4.rgb, at most 255; fog VU 4.w + VU 5.w q (at most VU 7.w); the second
+        // variant (TOP.z & 0x8000) takes that over VU 7.w (0..1) as the alpha's factor instead, without the size limit.
+        // The lens flares (the effects image's 0x2338; checked against 2,866 flare elements of PS2X_VU1_RECORD runs:
+        // counts, colours, UVs and corners exact). VU 44: the screen centre (xy), the groups (z) and the elements (w);
+        // element j at 45 + 3j (its light on screen), 46 + 3j (flags in x, then three terms) and 47 + 3j (colour, and
+        // the light's visibility in w); group g at 8 + g (TEX0 in xy, the step along the line in z, the size in w), 26 +
+        // g (colour, and a size factor in w), its UV extent at 272 + (8 + g).w & 3. First each element's scale and
+        // visibility (flags 1: drawn; 16: |z|; 8: scaled by the third term, hidden when that leaves the visibility <= 0;
+        // the second divide takes Q before VU1's new one lands, so twice the first), then each group: one sprite per
+        // drawn element, on the line from the centre to the light, the first group sized by the element's scale (alpha
+        // 192), the others fixed (alpha 128, colours times the visibility, at most 32); an element whose colour comes
+        // out under 1 on all three is left out of the groups after. The packet's own A+D sets ALPHA (0x48: added) and
+        // TEX0, from the two output buffers (0x110, 0x288) the groups alternate between; Z is the farthest, on top.
+        void lensFlares(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            VuImage &vu = s.vu;
+            const float centre[2] = {vu.f(44, 0), vu.f(44, 1)};
+            const uint32_t groups = vu.w(44, 2) & 0xffffu, items = vu.w(44, 3) & 0xffffu;
+            std::vector<uint8_t> drawn(items);
+            std::vector<float> scale(items), seen(items);
+            for (uint32_t j = 0; j < items; ++j)
+            {
+                const uint32_t flags = vu.w(46 + 3 * j, 0);
+                const float a = vu.f(46 + 3 * j, 1), b = vu.f(46 + 3 * j, 2), c = vu.f(46 + 3 * j, 3);
+                float visibility = vu.f(47 + 3 * j, 3), size = 0.0f;
+                bool show = (flags & 1u) != 0u;
+                if (show)
+                {
+                    const float root = std::sqrt(std::fabs(visibility));
+                    const float z = ((flags & 16u) ? std::fabs(b) : std::max(b, 0.0f)) + (c - 1.0f);
+                    visibility = visibility / a / a;
+                    size = root / a;
+                    if (flags & 8u)
+                    {
+                        size = size * z / c;
+                        const float scaled = visibility * z;
+                        visibility = scaled / c;
+                        show = scaled > 0.0f;
+                    }
+                }
+                drawn[j] = show ? 1u : 0u;
+                scale[j] = size;
+                seen[j] = visibility;
+            }
+            for (uint32_t g = 0; g < groups; ++g)
+            {
+                const uint32_t buffer = (g & 1u) ? 0x288u : 0x110u;
+                // VU1 writes the group's TEX0 into its buffer's A+D block (SQ.xy at 0x2508): the copy here does too.
+                vu.words[(buffer + 2u) * 4u + 0u] = vu.w(8 + g, 0);
+                vu.words[(buffer + 2u) * 4u + 1u] = vu.w(8 + g, 1);
+                if (!useMaterial(s, buffer + 3u, 0u, triangles, 0x53531u, buffer + 1u, vu.w(buffer, 0) & 0x7fffu))
+                {
+                    static uint32_t s_logged = 0;
+                    if (s_logged++ < 20u)
+                        std::fprintf(stderr, "[tmb:native] flares: buffer %#x tag %08x %08x %08x %08x, A+D tag %08x %08x %08x %08x\n", buffer,
+                                     vu.w(buffer + 3u, 0), vu.w(buffer + 3u, 1), vu.w(buffer + 3u, 2), vu.w(buffer + 3u, 3), vu.w(buffer, 0),
+                                     vu.w(buffer, 1), vu.w(buffer, 2), vu.w(buffer, 3));
+                    continue;
+                }
+                const uint32_t width = 1u << ((s.tex0 >> 26) & 0xfu), height = 1u << ((s.tex0 >> 30) & 0xfu);
+                const float step = vu.f(8 + g, 2), sizeX = vu.f(8 + g, 3), sizeY = vu.f(8 + g, 3) * 0.5f;
+                const float colour[4] = {vu.f(26 + g, 0), vu.f(26 + g, 1), vu.f(26 + g, 2), vu.f(26 + g, 3)};
+                const float extent = static_cast<float>(vu.w(272u + (vu.w(8 + g, 3) & 3u), 3)) / 16.0f;
+                for (uint32_t j = 0; j < items; ++j)
+                {
+                    if (!drawn[j])
+                        continue;
+                    const float w = scale[j] * colour[3], weight = colour[3] * seen[j];
+                    float rgb[3];
+                    for (int i = 0; i < 3; ++i)
+                        rgb[i] = colour[i] * vu.f(47 + 3 * j, i) * (g == 0u ? 1.0f : weight);
+                    const float x = centre[0] + (vu.f(45 + 3 * j, 0) - centre[0]) * step;
+                    const float y = centre[1] + (vu.f(45 + 3 * j, 1) - centre[1]) * step;
+                    const float dx = g == 0u ? sizeX * w : sizeX, dy = g == 0u ? sizeY * w : sizeY;
+                    const float limit = g == 0u ? 255.0f : 32.0f;
+                    const uint32_t alpha = g == 0u ? 192u : 128u;
+                    uint32_t rgba = alpha << 24;
+                    for (int i = 0; i < 3; ++i)
+                        rgba |= clampByte(std::min(rgb[i], limit)) << (8 * i);
+                    if (rgb[0] < 1.0f && rgb[1] < 1.0f && rgb[2] < 1.0f)
+                        drawn[j] = 0u; // SUBw.xyz vf0, vf22, vf0w: left out of the next groups
+                    const float xs[4] = {x + dx, x - dx, x + dx, x - dx}, ys[4] = {y + dy, y + dy, y - dy, y - dy};
+                    const float us[4] = {0.5f, extent, 0.5f, extent}, vs[4] = {0.5f, 0.5f, extent, extent};
+                    ps2x::native::Vertex corner[4];
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        corner[i].x = xs[i];
+                        corner[i].y = ys[i];
+                        corner[i].z = 16777215.0f; // XYZ2: FTOI4 of 1048575.94, Z 0xffffff (the farthest)
+                        corner[i].u = us[i] / width;
+                        corner[i].v = vs[i] / height;
+                        corner[i].rgba = rgba;
+                        corner[i].fog = 0.0f;
+                    }
+                    const int order[6] = {0, 1, 2, 1, 2, 3}; // as GifToNative splits a sprite (the check compares in order)
+                    for (int i : order)
+                        triangles.push_back(corner[i]);
+                }
+            }
+        }
+
+        // The effects image's streaks (0x118; checked against the lines of PS2X_VU1_RECORD runs: counts, positions and
+        // alpha exact, colours within one step of VU1's rounding). Its input at 0x218 (not TOP): x the palette's scale,
+        // the tag's PRIM and registers (a line, Gouraud, RGBAQ XYZ2 twice) in y and z, the count in w (negative: times
+        // the matrix at 0x21a-0x21d). Line k runs from VU 8 + k to it minus twice VU 264 + k, through VU 0-3 with its
+        // z row over 16; its colour between palette entries VU 520 + i and 521 + i (i and the step: VU (264 + k).w times
+        // 0x218.x), its alpha times (VU 4.w + VU 5.w q) (8 + k).w / 255 (q the start's 1 / w, at most 255), the far
+        // end's alpha 0. Dropped when either end leaves VU 6.w's guard band (offset by VU 6.xy), lies behind the camera
+        // (VU 6.z + w < -VU 6.w) or the alpha is under 1. Drawn as GifToNative draws a line: a quad one pixel wide.
+        void streaks(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            if (!useMaterial(s, 0x218u, 0u, triangles, 0x5151u))
+                return;
+            int32_t count = static_cast<int32_t>(vu.w(0x218u, 3));
+            float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+            if (count < 0)
+            {
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        object[j][k] = vu.f(0x21au + j, k);
+                count &= 0x7fff;
+            }
+            float m[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    m[j * 4 + k] = (vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] + vu.f(3, k) * object[j][3]) *
+                                   (k == 2 ? 0.0625f : 1.0f);
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float guard = std::fabs(c6[3]), scale = vu.f(0x218u, 0);
+            for (int32_t k = 0; k < count; ++k)
+            {
+                const uint32_t at = 8u + static_cast<uint32_t>(k);
+                const float start[4] = {vu.f(at, 0), vu.f(at, 1), vu.f(at, 2), vu.f(at, 3)};
+                const float end[3] = {start[0] - 2.0f * vu.f(264u + k, 0), start[1] - 2.0f * vu.f(264u + k, 1), start[2] - 2.0f * vu.f(264u + k, 2)};
+                float a[4], b[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    a[i] = m[i] * start[0] + m[4 + i] * start[1] + m[8 + i] * start[2] + m[12 + i];
+                    b[i] = m[i] * end[0] + m[4 + i] * end[1] + m[8 + i] * end[2] + m[12 + i];
+                }
+                const float qa = 1.0f / a[3], qb = 1.0f / b[3];
+                const float t = vu.f(264u + k, 3) * scale;
+                const int32_t index = static_cast<int32_t>(t);
+                const float step = t - static_cast<float>(index);
+                const uint32_t low = (520u + static_cast<uint32_t>(index)) & 0x3ffu, high = (521u + static_cast<uint32_t>(index)) & 0x3ffu;
+                float colour[4];
+                for (int i = 0; i < 4; ++i)
+                    colour[i] = vu.f(low, i) - vu.f(low, i) * step + vu.f(high, i) * step;
+                colour[3] = std::min(colour[3] * (c4[3] / 255.0f * start[3] + c5[3] / 255.0f * start[3] * qa), 255.0f);
+                const float ax = a[0] * qa, ay = a[1] * qa, bx = b[0] * qb, by = b[1] * qb;
+                if (std::fabs(ax + c6[0]) > guard || std::fabs(ay + c6[1]) > guard || c6[2] + a[3] < -guard ||
+                    std::fabs(bx + c6[0]) > guard || std::fabs(by + c6[1]) > guard || c6[2] + b[3] < -guard || colour[3] < 1.0f)
+                    continue;
+                uint32_t nearColour = 0;
+                for (int i = 0; i < 4; ++i)
+                    nearColour |= (static_cast<uint32_t>(static_cast<int32_t>(colour[i])) & 0xffu) << (8 * i);
+                const uint32_t farColour = nearColour & 0x00ffffffu;
+                const float dx = bx - ax, dy = by - ay, length = std::sqrt(dx * dx + dy * dy);
+                const float nx = length > 0.0f ? -dy / length * 0.5f : 0.5f, ny = length > 0.0f ? dx / length * 0.5f : 0.0f;
+                ps2x::native::Vertex corner[4];
+                const float xs[4] = {ax + nx, ax - nx, bx + nx, bx - nx}, ys[4] = {ay + ny, ay - ny, by + ny, by - ny};
+                for (int i = 0; i < 4; ++i)
+                {
+                    corner[i].x = xs[i];
+                    corner[i].y = ys[i];
+                    corner[i].z = (i < 2 ? a[2] * qa : b[2] * qb) * 16.0f; // XYZ2: FTOI4's value whole is the GS Z
+                    corner[i].rgba = i < 2 ? nearColour : farColour;
+                }
+                const int order[6] = {0, 1, 2, 1, 2, 3}; // as GifToNative splits a line (the check compares in order)
+                for (int i : order)
+                    triangles.push_back(corner[i]);
+            }
+        }
+
+        // VU1's random numbers (RINIT, RNEXT): a 23-bit shift register under the exponent of 1.0.
+        uint32_t vuRandInit(float seed)
+        {
+            uint32_t value;
+            std::memcpy(&value, &seed, 4);
+            return 0x3f800000u | (value & 0x7fffffu);
+        }
+
+        uint32_t vuRandNext(uint32_t r)
+        {
+            const uint32_t x = (r >> 4) & 1u, y = (r >> 22) & 1u;
+            return (((r << 1) ^ x ^ y) & 0x7fffffu) | 0x3f800000u;
+        }
+
+        float vuRandFloat(uint32_t r)
+        {
+            float value;
+            std::memcpy(&value, &r, 4);
+            return value;
+        }
+
+        // The effects image's trails (0x1830; checked against 3,469 sprites of PS2X_VU1_RECORD runs: counts, corners,
+        // colours, UVs and the random choices exact). A curve through control points read downwards from VU 8 +
+        // (TOP + 6).z (negative: the batch's matrix at TOP + 7 too), its first point mirrored about TOP + 5, its last
+        // extended; each segment (TOP + 2.y sprites) evaluated by forward differences (TOP + 3: the velocity's weights,
+        // TOP + 4 the acceleration's, reversed after TOP + 2.z sprites, blended by 0.5, or 0.125 when TOP + 2.y is odd).
+        // Each sprite: half size VU 5.xyz (TOP + 2.x + TOP + 1.y t) times a random factor (TOP + 1.w), t counting from
+        // TOP + 6.y; colour between palette rows 264 + i and 265 + i (i: TOP + 1.x t (1 + 2a - a r), at most 31, a = TOP.x,
+        // multiplied once more at a segment's start after the first of a batch), plus VU 4; UVs from row 296 + (r & 3);
+        // fog and culling as the particles (the second corner's test on VU 6.z + fog). Batches of TOP + 2.w sprites (whole
+        // segments), TOP + 6.x in all. The random numbers are seeded from each segment's first point (its w).
+        void trails(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            if (!useMaterial(s, top, 0u, triangles, 0x43431u))
+                return;
+            const auto row = [&](uint32_t at, float out[4])
+            {
+                for (int i = 0; i < 4; ++i)
+                    out[i] = vu.f(at & 0x3ffu, i);
+            };
+            int32_t list = static_cast<int32_t>(vu.w(top + 6u, 2));
+            float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+            if (list < 0)
+            {
+                for (int j = 0; j < 4; ++j)
+                    row(top + 7u + j, object[j]);
+                list &= 0x7fff;
+            }
+            float m[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    m[j * 4 + k] = vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] + vu.f(3, k) * object[j][3];
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float(&c7)[4] = s.fxConst[3];
+            float t1[4], t3[4], t4[4], t5[4];
+            row(top + 1u, t1);
+            row(top + 3u, t3);
+            row(top + 4u, t4);
+            row(top + 5u, t5);
+            const float a = vu.f(top, 0), size0 = vu.f(top + 2u, 0);
+            const uint32_t perSegment = vu.w(top + 2u, 1) & 0xffffu, switchAt = vu.w(top + 2u, 2) & 0xffffu;
+            const uint32_t perBatch = vu.w(top + 2u, 3) & 0xffffu;
+            int32_t total = static_cast<int32_t>(vu.w(top + 6u, 0) & 0xffffu);
+            const float h = (vu.w(top + 2u, 1) & 1u) ? 0.125f : 0.5f, y13 = 1.0f + 2.0f * a;
+            float t = vu.f(top + 6u, 1);
+            const uint32_t width = 1u << ((s.tex0 >> 26) & 0xfu), height = 1u << ((s.tex0 >> 30) & 0xfu);
+            uint32_t at = static_cast<uint32_t>(list);
+            float p5[4], p6[4], p7[4], p8[4];
+            row(8u + at, p6);
+            row(7u + at, p7);
+            row(6u + at, p8);
+            --at;
+            const float d = 2.0f * (t5[0] * (p7[0] - p6[0]) + t5[1] * (p7[1] - p6[1]) + t5[2] * (p7[2] - p6[2]));
+            for (int i = 0; i < 3; ++i)
+                p5[i] = p7[i] - t5[i] * d;
+            p5[3] = 0.0f;
+            uint32_t random = vuRandNext(vuRandInit(p6[3]));
+            float rnd = vuRandFloat(random);
+            if (at == 0u)
+                for (int i = 0; i < 3; ++i)
+                    p8[i] = 2.0f * p7[i] - p6[i];
+            const float guard = std::fabs(c6[3]);
+            while (total > 0)
+            {
+                int32_t left = static_cast<int32_t>(std::min<uint32_t>(static_cast<uint32_t>(total), perBatch));
+                float pos[3] = {p6[0], p6[1], p6[2]};
+                bool firstSegment = true;
+                while (true)
+                {
+                    float vel[3], acc[3], late[3];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        vel[i] = p5[i] * t3[0] + p6[i] * t3[1] + p7[i] * t3[2] + p8[i] * t3[3];
+                        acc[i] = p5[i] * t4[0] + p6[i] * t4[1] + p7[i] * t4[2] + p8[i] * t4[3];
+                        late[i] = p5[i] * t4[3] + p6[i] * t4[2] + p7[i] * t4[1] + p8[i] * t4[0];
+                    }
+                    random = vuRandInit(p6[3]);
+                    --at;
+                    const bool switches = perSegment != 2u;
+                    const uint32_t mid = switches ? switchAt : 2u * perSegment;
+                    std::memcpy(p5, p6, sizeof(p5));
+                    std::memcpy(p6, p7, sizeof(p6));
+                    std::memcpy(p7, p8, sizeof(p7));
+                    if (at != 0u)
+                        row(7u + at, p8);
+                    else
+                        for (int i = 0; i < 3; ++i)
+                            p8[i] = 2.0f * p7[i] - p6[i];
+                    for (uint32_t k = perSegment; k > 0; --k)
+                    {
+                        const float sizeFactor = 1.0f - t1[3] + rnd * t1[3];
+                        float pal = std::min(t1[0] * t * (y13 - a * rnd), 31.0f);
+                        if (k == perSegment && !firstSegment)
+                            pal = std::min(pal * (y13 - a * rnd), 31.0f); // 0x19c0 multiplies the carried value again
+                        const int32_t index = static_cast<int32_t>(pal);
+                        const float step = pal - static_cast<float>(index);
+                        const float size = (t1[1] * t + size0) * sizeFactor;
+                        t += 1.0f;
+                        random = vuRandNext(random);
+                        rnd = vuRandFloat(random);
+                        float c[4];
+                        for (int i = 0; i < 4; ++i)
+                            c[i] = m[i] * pos[0] + m[4 + i] * pos[1] + m[8 + i] * pos[2] + m[12 + i];
+                        const float q = 1.0f / c[3];
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            pos[i] += vel[i];
+                            vel[i] += acc[i];
+                        }
+                        if (switches && k - 1u == mid)
+                            for (int i = 0; i < 3; ++i)
+                            {
+                                vel[i] = vel[i] - acc[i] * h + late[i] * h;
+                                acc[i] = late[i];
+                            }
+                        const float x0 = c[0] * q - c5[0] * size * q, y0 = c[1] * q - c5[1] * size * q;
+                        const float x1 = c[0] * q + c5[0] * size * q, y1 = c[1] * q + c5[1] * size * q;
+                        const float z1 = c[2] * q + c5[2] * size * q;
+                        const float fog = std::min(c4[3] + c5[3] * q, c7[3]);
+                        --left;
+                        --total;
+                        if (std::fabs(x0 + c6[0]) > guard || std::fabs(y0 + c6[1]) > guard || c6[2] + c[3] < -guard ||
+                            std::fabs(x1 + c6[0]) > guard || std::fabs(y1 + c6[1]) > guard || c6[2] + fog < -guard)
+                            continue;
+                        uint32_t rgba = 0;
+                        const uint32_t low = (264u + static_cast<uint32_t>(index)) & 0x3ffu, high = (265u + static_cast<uint32_t>(index)) & 0x3ffu;
+                        for (int i = 0; i < 4; ++i)
+                        {
+                            const float lo = static_cast<float>(static_cast<int32_t>(vu.w(low, i)));
+                            const float hi = static_cast<float>(static_cast<int32_t>(vu.w(high, i)));
+                            const float bias = (i < 3 ? c4[i] : 0.0f) + 8388608.0f; // vf30: VU 4.rgb + 2^23
+                            const float value = std::min((lo - lo * step + hi * step) + bias, 8388863.0f);
+                            rgba |= (static_cast<uint32_t>(static_cast<int32_t>(value - 8388608.0f)) & 0xffu) << (8 * i);
+                        }
+                        const uint32_t uvRow = 296u + (random & 3u);
+                        const float u0 = static_cast<float>(vu.w(uvRow, 0)) / 16.0f / width, v0 = static_cast<float>(vu.w(uvRow, 1)) / 16.0f / height;
+                        const float u1 = static_cast<float>(vu.w(uvRow, 2)) / 16.0f / width, v1 = static_cast<float>(vu.w(uvRow, 3)) / 16.0f / height;
+                        ps2x::native::Vertex corner[4];
+                        const float xs[4] = {x0, x1, x0, x1}, ys[4] = {y0, y0, y1, y1}, us[4] = {u0, u1, u0, u1}, vs[4] = {v0, v0, v1, v1};
+                        for (int i = 0; i < 4; ++i)
+                        {
+                            corner[i].x = xs[i];
+                            corner[i].y = ys[i];
+                            corner[i].z = z1;
+                            corner[i].u = us[i];
+                            corner[i].v = vs[i];
+                            corner[i].rgba = rgba;
+                            corner[i].fog = std::floor(std::max(fog, 0.0f)) / 255.0f;
+                        }
+                        const int order[6] = {0, 1, 2, 1, 2, 3};
+                        for (int i : order)
+                            triangles.push_back(corner[i]);
+                    }
+                    std::memcpy(pos, p6, sizeof(pos));
+                    firstSegment = false;
+                    if (left == 0 || total <= 0) // VU1 ends a batch at exactly 0 (whole segments); the total bounds it here
+                        break;
+                }
+            }
+        }
+
+        // The effects image's textured particles (0x798, its MSCNTs at 0x9b8; checked against 63,644 sprites of
+        // PS2X_VU1_RECORD runs: counts, TEX0, colours, UVs, corners and fog exact, Z within float rounding). As 0x390,
+        // but each particle brings its own TEX0 (VU 264 + i, i at TOP + 1 + 6k) and 6 quadwords (TEX0, colour at TOP + 2 +
+        // 6k, the UV row's index at TOP + 3 + 6k), the batch's matrix at TOP + 4 + 6j, and Z set from the distance alone:
+        // -1024 + 16778240 / (w - (TOP + 4).x).
+        void texParticles(State &s, std::vector<ps2x::native::Vertex> &triangles, bool first)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            if (first)
+            {
+                const int32_t list = static_cast<int32_t>(vu.w(top, 3));
+                float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+                if (list < 0)
+                    for (int j = 0; j < 4; ++j)
+                        for (int k = 0; k < 4; ++k)
+                            object[j][k] = vu.f(top + 4u + 6u * j, k);
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        s.fxMatrix[j * 4 + k] = vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] +
+                                                vu.f(3, k) * object[j][3];
+                s.fxNext = (static_cast<uint32_t>(list) & 0x7fffu) + 7u;
+                s.fxBias = vu.f(top + 4u, 0);
+            }
+            if (!useMaterial(s, top, 0u, triangles, 0x434316u))
+                return;
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float(&c7)[4] = s.fxConst[3];
+            const uint32_t count = vu.w(top, 0) & 0xffffu;
+            const float guard = std::fabs(c6[3]);
+            for (uint32_t k = 0; k < count; ++k)
+            {
+                const uint32_t at = s.fxNext-- & 0x3ffu;
+                const float p[4] = {vu.f(at, 0), vu.f(at, 1), vu.f(at, 2), vu.f(at, 3)};
+                float c[4];
+                for (int i = 0; i < 4; ++i)
+                    c[i] = s.fxMatrix[i] * p[0] + s.fxMatrix[4 + i] * p[1] + s.fxMatrix[8 + i] * p[2] + s.fxMatrix[12 + i];
+                const float q = 1.0f / c[3];
+                const float hx = std::min(c5[0] * p[3] * q, c5[0] * 0.5f), hy = std::min(c5[1] * p[3] * q, c5[1] * 0.5f);
+                const float fog = std::min(c4[3] + c5[3] * q, c7[3]);
+                const float z = -1024.0f + 16778240.0f / (c[3] - s.fxBias);
+                const float x0 = c[0] * q - hx, y0 = c[1] * q - hy, x1 = c[0] * q + hx, y1 = c[1] * q + hy;
+                if (std::fabs(x0 + c6[0]) > guard || std::fabs(y0 + c6[1]) > guard || c6[2] + c[3] < -guard ||
+                    std::fabs(x1 + c6[0]) > guard || std::fabs(y1 + c6[1]) > guard || c6[2] + fog < -guard)
+                    continue;
+                const uint32_t base = top + 1u + 6u * k;
+                const uint32_t texRow = (264u + (vu.w(base, 0) & 0xffffu)) & 0x3ffu;
+                const uint64_t tex0 = static_cast<uint64_t>(vu.w(texRow, 0)) | (static_cast<uint64_t>(vu.w(texRow, 1)) << 32);
+                if (tex0 != s.tex0 || !s.haveTexture)
+                {
+                    flush(s, triangles); // the sprite's own TEX0 (written per sprite in the packet)
+                    s.tex0 = s.lastTex0 = tex0;
+                    s.haveTexture = true;
+                }
+                const uint32_t width = 1u << ((tex0 >> 26) & 0xfu), height = 1u << ((tex0 >> 30) & 0xfu);
+                uint32_t rgba = 0;
+                for (int i = 0; i < 4; ++i)
+                {
+                    const float value = static_cast<float>(static_cast<int32_t>(vu.w(base + 1u, i))) + (i < 3 ? c4[i] : 0.0f);
+                    rgba |= std::min(static_cast<uint32_t>(std::max(value, 0.0f)), 255u) << (8 * i);
+                }
+                const uint32_t uvRow = (296u + (vu.w(base + 2u, 0) & 0xffffu)) & 0x3ffu;
+                const float u0 = static_cast<float>(vu.w(uvRow, 0)) / 16.0f / width, v0 = static_cast<float>(vu.w(uvRow, 1)) / 16.0f / height;
+                const float u1 = static_cast<float>(vu.w(uvRow, 2)) / 16.0f / width, v1 = static_cast<float>(vu.w(uvRow, 3)) / 16.0f / height;
+                ps2x::native::Vertex corner[4];
+                const float xs[4] = {x0, x1, x0, x1}, ys[4] = {y0, y0, y1, y1}, us[4] = {u0, u1, u0, u1}, vs[4] = {v0, v0, v1, v1};
+                for (int i = 0; i < 4; ++i)
+                {
+                    corner[i].x = xs[i];
+                    corner[i].y = ys[i];
+                    corner[i].z = z;
+                    corner[i].u = us[i];
+                    corner[i].v = vs[i];
+                    corner[i].rgba = rgba;
+                    corner[i].fog = std::floor(std::max(fog, 0.0f)) / 255.0f;
+                }
+                const int order[6] = {0, 1, 2, 1, 2, 3};
+                for (int i : order)
+                    triangles.push_back(corner[i]);
+            }
+        }
+
+        // The effects image's heat haze (0xa08; checked against the fans of PS2X_VU1_RECORD runs: counts, corners and
+        // alpha exact, the UVs as VU1's but clamped at 0). Each point read downwards from VU 7 + VU 268.x (negative: the
+        // batch's matrix at TOP - TOP + 3) is drawn as a fan of four triangles around it, textured with the frame itself
+        // (TEX0 the frame buffer, UVs the vertices' own screen positions less the origin VU1 takes: 1728, 2^19 - VU
+        // 268.y): the centre's UV moved by a random step (VU 5.xy VU 267.y (VU 267.z + r), r from the point's w) times
+        // q and a factor VU 268.w that grows by VU 268.z from point to point, which bends what is behind. Half size VU 5.xy
+        // VU 267.y q; centre colour VU 266 with alpha min(fog VU 267.w, 128) times the factor, the corners VU 269; Z the
+        // centre's, whole. PRIM from VU 265 (a fan, blended). Dropped as the particles are.
+        void heatHaze(State &s, std::vector<ps2x::native::Vertex> &triangles)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            s.prim = vu.w(265, 0) & 0x7ffu; // the packet's PRIM, written per fan
+            // The tag VU1 kicks is VU 264's (SQ.yzw vf20 to TOP at 0xae8; TOP itself holds an A+D tag till then).
+            if (!useMaterial(s, 264u, 0u, triangles, 0x35315310u))
+                return;
+            if (!s.sampleTarget)
+            {
+                flush(s, triangles);
+                s.sampleTarget = true;
+            }
+            int32_t count = static_cast<int32_t>(vu.w(268, 0));
+            float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+            if (count < 0)
+            {
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        object[j][k] = vu.f(top + j, k);
+                count &= 0x7fff;
+            }
+            float m[16];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    m[j * 4 + k] = vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] + vu.f(3, k) * object[j][3];
+            const float(&c4)[4] = s.fxConst[0];
+            const float(&c5)[4] = s.fxConst[1];
+            const float(&c6)[4] = s.fxConst[2];
+            const float sizeX = c5[0] * vu.f(267, 1), sizeY = c5[1] * vu.f(267, 1);
+            const float originX = 524288.0f - 522560.0f, originY = 524288.0f - vu.f(268, 1);
+            float factor = vu.f(268, 3);
+            uint32_t at = static_cast<uint32_t>(count) + 7u;
+            const auto jitter = [&](float seed, float out[2])
+            {
+                uint32_t r = vuRandNext(vuRandInit(seed));
+                const float rx = vuRandFloat(r);
+                r = vuRandNext(r);
+                const float ry = vuRandFloat(r);
+                out[0] = sizeX * vu.f(267, 2) + sizeX * rx;
+                out[1] = sizeY * vu.f(267, 2) + sizeY * ry;
+            };
+            float step[2];
+            jitter(vu.f(at & 0x3ffu, 3), step);
+            uint32_t centreColour = 0, cornerColour = 0;
+            for (int i = 0; i < 3; ++i)
+            {
+                centreColour |= (vu.w(266, i) & 0xffu) << (8 * i);
+                cornerColour |= (vu.w(269, i) & 0xffu) << (8 * i);
+            }
+            cornerColour |= (vu.w(269, 3) & 0xffu) << 24;
+            const float guard = std::fabs(c6[3]);
+            for (int32_t k = 0; k < count; ++k)
+            {
+                const uint32_t here = at-- & 0x3ffu;
+                const float p[3] = {vu.f(here, 0), vu.f(here, 1), vu.f(here, 2)};
+                float c[4];
+                for (int i = 0; i < 4; ++i)
+                    c[i] = m[i] * p[0] + m[4 + i] * p[1] + m[8 + i] * p[2] + m[12 + i];
+                const float q = 1.0f / c[3];
+                const float cx = c[0] * q, cy = c[1] * q, z = std::trunc(c[2] * q); // XYZ2's Z: FTOI0, whole
+                const float fog = c4[3] + c5[3] * q;
+                const float x0 = cx - sizeX * q, y0 = cy - sizeY * q, x1 = cx + sizeX * q, y1 = cy + sizeY * q;
+                const float alpha = std::min(fog * vu.f(267, 3), 128.0f) * factor;
+                const float du = step[0] * q * factor, dv = step[1] * q * factor;
+                factor += vu.f(268, 2);
+                jitter(vu.f(at & 0x3ffu, 3), step);
+                if (std::fabs(x0 + c6[0]) > guard || std::fabs(y0 + c6[1]) > guard || c6[2] + c[3] < -guard ||
+                    std::fabs(x1 + c6[0]) > guard || std::fabs(y1 + c6[1]) > guard || c6[2] + fog < -guard)
+                    continue;
+                ps2x::native::Vertex v[5];
+                const float xs[5] = {cx, x0, x1, x1, x0}, ys[5] = {cy, y0, y0, y1, y1};
+                for (int i = 0; i < 5; ++i)
+                {
+                    v[i].x = xs[i];
+                    v[i].y = ys[i];
+                    v[i].z = z;
+                    v[i].u = std::max(xs[i] - originX, 0.0f);
+                    v[i].v = std::max(ys[i] - originY, 0.0f);
+                    v[i].rgba = cornerColour;
+                }
+                v[0].u = std::max(cx - originX + du, 0.0f);
+                v[0].v = std::max(cy - originY + dv, 0.0f);
+                v[0].rgba = centreColour | (std::min(static_cast<uint32_t>(std::max(alpha, 0.0f)), 255u) << 24);
+                const int fan[12] = {0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1};
+                for (int i : fan)
+                    triangles.push_back(v[i]);
+            }
+            flush(s, triangles);
+            s.sampleTarget = false;
+        }
+
+        void particles(State &s, std::vector<ps2x::native::Vertex> &triangles, bool first)
+        {
+            ++g_stats.strips;
+            const VuImage &vu = s.vu;
+            const uint32_t top = s.top;
+            uint32_t tagQw = top, data = top + 1u;
+            if (first)
+            {
+                tagQw = top + 2u;
+                data = top + 3u;
+                const int32_t list = static_cast<int32_t>(vu.w(top, 3));
+                float object[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+                if (list < 0)
+                    for (int j = 0; j < 4; ++j)
+                        for (int k = 0; k < 4; ++k)
+                            object[j][k] = vu.f(top + 5u + 5u * j, k);
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        s.fxMatrix[j * 4 + k] = vu.f(0, k) * object[j][0] + vu.f(1, k) * object[j][1] + vu.f(2, k) * object[j][2] +
+                                                vu.f(3, k) * object[j][3];
+                s.fxNext = (static_cast<uint32_t>(list) & 0x7fffu) + 7u;
+                s.fxFade = (vu.w(top, 2) & 0x8000u) != 0u;
+                if (!useMaterial(s, tagQw, 0u, triangles, 0x43431u, top + 1u, vu.w(top, 0) & 0x7fffu))
+                    return;
+            }
+            else if (!useMaterial(s, tagQw, 0u, triangles, 0x43431u))
+                return;
+            const float(&c4)[4] = s.fxConst[0]; // VU 4 (vf29)
+            const float(&c5)[4] = s.fxConst[1]; // VU 5 (vf27)
+            const float(&c6)[4] = s.fxConst[2]; // VU 6 (vf28)
+            const float(&c7)[4] = s.fxConst[3]; // VU 7 (vf31)
+            const uint32_t width = 1u << ((s.tex0 >> 26) & 0xfu), height = 1u << ((s.tex0 >> 30) & 0xfu);
+            const uint32_t count = vu.w(tagQw, 0) & 0x7fffu;
+            const float guard = std::fabs(c6[3]);
+            for (uint32_t k = 0; k < count; ++k)
+            {
+                const uint32_t at = s.fxNext-- & 0x3ffu;
+                const float p[4] = {vu.f(at, 0), vu.f(at, 1), vu.f(at, 2), vu.f(at, 3)};
+                float c[4];
+                for (int i = 0; i < 4; ++i)
+                    c[i] = s.fxMatrix[i] * p[0] + s.fxMatrix[4 + i] * p[1] + s.fxMatrix[8 + i] * p[2] + s.fxMatrix[12 + i];
+                const float q = 1.0f / c[3];
+                float half[3];
+                for (int i = 0; i < 3; ++i)
+                    half[i] = c5[i] * p[3] * q;
+                float fog, fade = 1.0f;
+                if (!s.fxFade)
+                {
+                    half[0] = std::min(half[0], c5[0] * 0.5f);
+                    half[1] = std::min(half[1], c5[1] * 0.5f);
+                    fog = std::max(std::min(c4[3] + c5[3] * q, c7[3]), 0.0f);
+                }
+                else
+                    fog = fade = std::max(std::min((c4[3] + c5[3] * q) / c7[3], 1.0f), 0.0f);
+                const float x0 = c[0] * q - half[0], y0 = c[1] * q - half[1];
+                const float x1 = c[0] * q + half[0], y1 = c[1] * q + half[1], z = c[2] * q + half[2];
+                if (std::fabs(x0 + c6[0]) > guard || std::fabs(y0 + c6[1]) > guard || std::fabs(x1 + c6[0]) > guard ||
+                    std::fabs(y1 + c6[1]) > guard || c6[2] + c[3] < -guard) // the raw w (ADDw.z vf18 before the divide)
+                    continue;
+                const uint32_t qw = data + 5u * k;
+                uint32_t rgba = 0;
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float value = static_cast<float>(static_cast<int32_t>(vu.w(qw, i))) + c4[i];
+                    const uint32_t byte = s.fxFade ? static_cast<uint32_t>(static_cast<int32_t>(value)) & 0xffu : clampByte(std::min(value, 255.0f));
+                    rgba |= byte << (8 * i);
+                }
+                const float alpha = static_cast<float>(static_cast<int32_t>(vu.w(qw, 3))) * fade;
+                const uint32_t alphaByte = s.fxFade ? static_cast<uint32_t>(static_cast<int32_t>(alpha)) & 0xffu : clampByte(std::min(alpha, 255.0f));
+                rgba |= alphaByte << 24;
+                const uint32_t row = 296u + vu.w(qw + 1u, 0);
+                const float u0 = static_cast<float>(vu.w(row, 0)) / 16.0f / width, v0 = static_cast<float>(vu.w(row, 1)) / 16.0f / height;
+                const float u1 = static_cast<float>(vu.w(row, 2)) / 16.0f / width, v1 = static_cast<float>(vu.w(row, 3)) / 16.0f / height;
+                ps2x::native::Vertex corner[4];
+                const float xs[4] = {x0, x1, x0, x1}, ys[4] = {y0, y0, y1, y1}, us[4] = {u0, u1, u0, u1}, vs[4] = {v0, v0, v1, v1};
+                for (int i = 0; i < 4; ++i)
+                {
+                    corner[i].x = xs[i];
+                    corner[i].y = ys[i];
+                    corner[i].z = z; // a sprite takes its second vertex's Z and fog
+                    corner[i].u = us[i];
+                    corner[i].v = vs[i];
+                    corner[i].rgba = rgba;
+                    corner[i].fog = std::floor(fog) / 255.0f;
+                }
+                const int order[6] = {0, 1, 2, 1, 2, 3}; // as GifToNative splits a sprite (the check compares in order)
+                for (int i : order)
+                    triangles.push_back(corner[i]);
+            }
+        }
+
         void strip(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
             if (s.mode == Mode::None)
                 return;
+            if (s.mode == Mode::Particles)
+            {
+                particles(s, triangles, false);
+                return;
+            }
+            if (s.mode == Mode::TexParticles)
+            {
+                texParticles(s, triangles, false);
+                return;
+            }
+            if (s.mode == Mode::Trails)
+            {
+                static uint32_t s_logged = 0;
+                if (s_logged++ < 5u)
+                    std::fprintf(stderr, "[tmb:native] an MSCNT after a trail (0x1c38): not translated, not drawn\n");
+                return;
+            }
+            if (s.mode == Mode::Streaks) // 0x118 ends at 0x390: its MSCNT is that program's start
+            {
+                s.mode = Mode::Particles;
+                particles(s, triangles, true);
+                return;
+            }
             if (s.mode == Mode::Reflective)
             {
                 reflectiveStrip(s, triangles);
@@ -945,9 +1659,9 @@ namespace tmb::native
                 ribbon(s, triangles);
                 return;
             }
-            if (s.mode == Mode::SkinDirectional)
+            if (s.mode == Mode::SkinDirectional || s.mode == Mode::SkinUnlit)
             {
-                skinnedStrip(s, triangles);
+                skinnedStrip(s, triangles, s.mode == Mode::SkinDirectional);
                 return;
             }
             if (s.mode == Mode::Sprite)
@@ -1013,13 +1727,20 @@ namespace tmb::native
 
         void flush(State &s, std::vector<ps2x::native::Vertex> &triangles)
         {
+            if (s.collecting)
+            {
+                s.checkMine.insert(s.checkMine.end(), triangles.begin() + static_cast<std::ptrdiff_t>(std::min(s.particleFrom, triangles.size())),
+                                   triangles.end());
+                s.particleFrom = 0;
+            }
             s.flushed = true;
             if (triangles.empty())
                 return;
             g_stats.triangles += triangles.size() / 3u;
             g_stats.textured += s.haveTexture ? 1u : 0u;
             ps2x::native::Material material;
-            material.textured = s.haveTexture;
+            material.textured = s.haveTexture && !s.sampleTarget;
+            material.sampleTarget = s.sampleTarget;
             material.tex0 = s.tex0;
             material.blend = s.blended ? blendFor(s.batchAlpha) : ps2x::native::Material::Blend::Opaque;
             material.depthWrite = s.mode != Mode::Rain && !s.batchDepthMasked;
@@ -1034,7 +1755,11 @@ namespace tmb::native
             material.fog = s.fogged && s.mode != Mode::Rain;
             material.fogColour = s.batchFogColour;
             static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon ? kScreenSpace : s.matrix, triangles.data(),
+            ps2x::native::Renderer::instance().draw(material, s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon || s.mode == Mode::Particles ||
+                                                                s.mode == Mode::LensFlares || s.mode == Mode::Streaks || s.mode == Mode::Trails ||
+                                                                s.mode == Mode::TexParticles || s.mode == Mode::HeatHaze
+                                                            ? kScreenSpace
+                                                            : s.matrix, triangles.data(),
                                                     static_cast<uint32_t>(triangles.size()));
             triangles.clear();
         }
@@ -1187,7 +1912,7 @@ namespace tmb::native
                                 else if (address == 0x47u)
                                     s.test = value;
                                 else if (address == 0x06u)
-                                    s.directTex0 = value;
+                                    s.directTex0 = s.lastTex0 = value;
                                 else if (address == 0x42u)
                                     s.alpha = value;
                                 else if (address == 0x3du)
@@ -1219,6 +1944,24 @@ namespace tmb::native
             return s_limit;
         }
 
+        // The memory the check's VU1 runs on: the adapter's copy itself (a vertex pass's writes, the pool's 1 / w and its
+        // screen positions, are what the strips after it read there), but a copy of it for the effects image's programs,
+        // whose output buffers (0x110-0x30c) would otherwise overwrite what the next objects' translations read.
+        uint8_t *checkMemory(State &s, bool effects)
+        {
+            if (!effects)
+                return reinterpret_cast<uint8_t *>(s.vu.words);
+            static std::vector<uint32_t> s_copy;
+            s_copy.assign(std::begin(s.vu.words), std::end(s.vu.words));
+            return reinterpret_cast<uint8_t *>(s_copy.data());
+        }
+
+        bool effectsMode(Mode mode)
+        {
+            return mode == Mode::Particles || mode == Mode::LensFlares || mode == Mode::Streaks || mode == Mode::Trails ||
+                   mode == Mode::TexParticles || mode == Mode::HeatHaze;
+        }
+
         void checkTranslation(State &s, const ps2x::native::Vertex *mine, size_t mineCount)
         {
             struct Tally
@@ -1233,7 +1976,9 @@ namespace tmb::native
             const std::vector<ps2x::native::Vertex> &vu = s.checkVertices;
             const auto screenOf = [&](const ps2x::native::Vertex &v, float out[3])
             {
-                if (s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon)
+                if (s.mode == Mode::Sprite || s.mode == Mode::Rain || s.mode == Mode::Ribbon || s.mode == Mode::Particles ||
+                    s.mode == Mode::LensFlares || s.mode == Mode::Streaks || s.mode == Mode::Trails || s.mode == Mode::TexParticles ||
+                    s.mode == Mode::HeatHaze)
                 {
                     out[0] = v.x, out[1] = v.y, out[2] = v.z;
                     return;
@@ -1249,8 +1994,8 @@ namespace tmb::native
             {
                 if (t.logged++ >= checkLimit())
                     return;
-                std::fprintf(stderr, "[tmb:check] setup 0x%x mode %d: %s at vertex %zu: mine %zu tri, VU1 %zu", s.checkSetup,
-                             static_cast<int>(s.mode), what, i, mineCount / 3u, vu.size() / 3u);
+                std::fprintf(stderr, "[tmb:check] setup 0x%x mode %d %s: %s at vertex %zu: mine %zu tri, VU1 %zu", s.checkSetup,
+                             static_cast<int>(s.mode), s.checkResumed ? "MSCNT" : "MSCAL", what, i, mineCount / 3u, vu.size() / 3u);
                 if (a && b && sa)
                     std::fprintf(stderr, " | mine xyz %.1f %.1f %.1f rgba %08x uv %.4f %.4f fog %.2f | VU1 xyz %.1f %.1f %.1f rgba %08x uv %.4f %.4f fog %.2f",
                                  sa[0], sa[1], sa[2], a->rgba, a->u, a->v, a->fog, b->x, b->y, b->z, b->rgba, b->u, b->v, b->fog);
@@ -1279,7 +2024,7 @@ namespace tmb::native
                 ++t.countDiffs;
                 log("triangle count differs", 0, nullptr, nullptr, nullptr);
                 // Why: the strip's vertices against the translation's pool (an index past it breaks the strip).
-                if (mineCount < vu.size() && t.logged <= checkLimit() && s.mode != Mode::Sprite && s.mode != Mode::SkinDirectional)
+                if (mineCount < vu.size() && t.logged <= checkLimit() && s.mode != Mode::Sprite && s.mode != Mode::SkinDirectional && s.mode != Mode::SkinUnlit)
                 {
                     const uint32_t top = s.top, nloop = s.vu.w(top, 0) & 0x7fffu;
                     uint32_t outside = 0, maxIndex = 0;
@@ -1388,16 +2133,21 @@ namespace tmb::native
                         s.sandbox->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
                     else if (cmd == 0x17 && s.check && s.checkSetup != 0u && s.mode != Mode::None)
                     {
-                        const size_t before = triangles.size();
-                        s.flushed = false;
+                        // Every triangle the strip makes, the batches it flushes on the way (a TEX0 per sprite) too.
+                        s.checkMine.clear();
+                        s.particleFrom = triangles.size();
+                        s.collecting = true;
                         strip(s, triangles);
-                        // A material change flushes before the strip adds its own: then all that is there is its.
-                        const size_t from = s.flushed ? 0u : before;
+                        s.collecting = false;
+                        s.checkMine.insert(s.checkMine.end(), triangles.begin() + static_cast<std::ptrdiff_t>(std::min(s.particleFrom, triangles.size())),
+                                           triangles.end());
                         s.checkVertices.clear();
                         s.checkMaterials.clear();
-                        s.check->resume(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), s.top, s.itops);
-                        s.check->gif().flush();
-                        checkTranslation(s, triangles.data() + from, triangles.size() - from);
+                        s.checkResumed = true;
+                        ps2x::native::Vu1Sandbox &vu1 = effectsMode(s.mode) ? *s.checkEffects : *s.check;
+                        vu1.resume(s.code, sizeof(s.code), checkMemory(s, effectsMode(s.mode)), sizeof(s.vu.words), s.top, s.itops);
+                        vu1.gif().flush();
+                        checkTranslation(s, s.checkMine.data(), s.checkMine.size());
                     }
                     else if (cmd == 0x17)
                         strip(s, triangles);
@@ -1493,6 +2243,74 @@ namespace tmb::native
                             ps2x::native::Renderer::instance().beginGroup(++s.group);
                             if (pc == 0x1d40u)
                                 rain(s, triangles);
+                            else if (pc == 0x0000u && !matches(kVertexPasses, s.code, pc))
+                            {
+                                // The effects image's constants (its 0x0): VU 4-7, which its programs keep in registers.
+                                for (int j = 0; j < 4; ++j)
+                                    for (int k = 0; k < 4; ++k)
+                                        s.fxConst[j][k] = s.vu.f(4 + j, k);
+                                s.mode = Mode::None;
+                            }
+                            else if (pc == 0x0a08u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::HeatHaze;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                heatHaze(s, triangles);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x0798u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::TexParticles;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                texParticles(s, triangles, true);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x1830u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Trails;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                trails(s, triangles);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x0118u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Streaks;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                streaks(s, triangles);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x2338u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::LensFlares;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                lensFlares(s, triangles);
+                                s.collecting = false;
+                            }
+                            else if (pc == 0x0390u)
+                            {
+                                ps2x::native::Renderer::instance().setKey(0);
+                                s.mode = Mode::Particles;
+                                s.checkMine.clear();
+                                s.particleFrom = triangles.size();
+                                s.collecting = s.check != nullptr;
+                                particles(s, triangles, true);
+                                s.collecting = false;
+                            }
                             else if (pc == 0x0000u)
                                 vertexPass(s);
                             else if (pc == 0x0010u)
@@ -1507,9 +2325,20 @@ namespace tmb::native
                                     s.checkSetup = pc;
                                 s.checkVertices.clear();
                                 s.checkMaterials.clear();
-                                s.check->call(s.code, sizeof(s.code), reinterpret_cast<uint8_t *>(s.vu.words), sizeof(s.vu.words), pc,
-                                              s.top, s.itops);
-                                s.check->gif().flush();
+                                const bool effects = effectsMode(s.mode) || (pc == 0x0000u && !matches(kVertexPasses, s.code, pc));
+                                ps2x::native::Vu1Sandbox &vu1 = effects ? *s.checkEffects : *s.check;
+                                vu1.call(s.code, sizeof(s.code), checkMemory(s, effects), sizeof(s.vu.words), pc, s.top, s.itops);
+                                vu1.gif().flush();
+                                // The particles' MSCAL draws (the setups do not): checked like a strip.
+                                s.checkResumed = false;
+                                if ((s.mode == Mode::Particles && pc == 0x0390u) || (s.mode == Mode::LensFlares && pc == 0x2338u) ||
+                                    (s.mode == Mode::Streaks && pc == 0x0118u) || (s.mode == Mode::Trails && pc == 0x1830u) ||
+                                    (s.mode == Mode::TexParticles && pc == 0x0798u) || (s.mode == Mode::HeatHaze && pc == 0x0a08u))
+                                {
+                                    s.checkMine.insert(s.checkMine.end(), triangles.begin() + static_cast<std::ptrdiff_t>(std::min(s.particleFrom, triangles.size())),
+                                                       triangles.end());
+                                    checkTranslation(s, s.checkMine.data(), s.checkMine.size());
+                                }
                             }
                         }
                     }
@@ -1661,6 +2490,8 @@ namespace tmb::native
                 State &st = state();
                 st.check = std::make_unique<ps2x::native::Vu1Sandbox>();
                 st.check->gif().setCapture(&st.checkVertices, &st.checkMaterials);
+                st.checkEffects = std::make_unique<ps2x::native::Vu1Sandbox>();
+                st.checkEffects->gif().setCapture(&st.checkVertices, &st.checkMaterials);
             }
             ps2x::native::setVu1Gate(&drawnNatively);
             ps2x::native::setDirectGate(&directDrawnNatively);
